@@ -1,0 +1,29 @@
+# 智慧交通后端接口测试
+
+### 健康检查
+GET http://127.0.0.1:8000/
+Accept: application/json
+
+###
+
+### 全部地铁线路（GeoJSON）
+GET http://127.0.0.1:8000/api/metro/routes
+Accept: application/json
+
+###
+
+### 单条线路详情（含站点与区间段）
+GET http://127.0.0.1:8000/api/metro/routes/3
+Accept: application/json
+
+###
+
+### 全部去重站点（GeoJSON）
+GET http://127.0.0.1:8000/api/metro/stops
+Accept: application/json
+
+###
+
+### 单个站点详情（含途经线路）
+GET http://127.0.0.1:8000/api/metro/stops/BV09092777
+Accept: application/json
