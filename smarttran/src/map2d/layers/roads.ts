@@ -42,13 +42,6 @@ function roadStyle(feature: { getId(): string | number | undefined }): Style[] {
       new Style({ stroke: new Stroke({ color: PALETTE.accentLight, width: 2 }) }),
     ]
   }
-  if (styleState.analysisHitIds.has(id)) {
-    return [
-      new Style({ stroke: new Stroke({ color: withAlpha(PALETTE.accent, 0.22), width: 9 }) }),
-      new Style({ stroke: new Stroke({ color: PALETTE.roadCasing, width: CASING_WIDTH }) }),
-      new Style({ stroke: new Stroke({ color, width: ROAD_WIDTH }) }),
-    ]
-  }
   return [
     new Style({ stroke: new Stroke({ color: PALETTE.roadCasing, width: CASING_WIDTH }) }),
     new Style({ stroke: new Stroke({ color, width: ROAD_WIDTH }) }),

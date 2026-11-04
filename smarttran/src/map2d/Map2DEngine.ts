@@ -8,6 +8,7 @@
 
 import Map from 'ol/Map'
 import View from 'ol/View'
+import Overlay from 'ol/Overlay'
 import ScaleLine from 'ol/control/ScaleLine'
 import { unByKey } from 'ol/Observable'
 import type { EventsKey } from 'ol/events'
@@ -22,10 +23,10 @@ import {
   getStop,
   getStopPoint,
 } from '@/common/data/metroRepository'
-import type { CameraState, GeoJSONFeatureCollection } from '@/common/types/geo'
+import type { CameraState, GeoJSONFeatureCollection, LngLat } from '@/common/types/geo'
 import type { MetroRouteProps, MetroStopProps } from '@/common/types/metro'
+import type { CoverageResult, NearbyStopsResult } from '@/common/types/analysis'
 import type {
-  BufferOverlay,
   MapEngine,
   MapEngineEvents,
   MapMode,
@@ -44,7 +45,15 @@ import { createBaseMapGroup, setBaseMap } from './layers/basemap'
 import { createRoadLayer } from './layers/roads'
 import { createStationLayer } from './layers/stations'
 import { createStationLabelLayer } from './layers/stationLabels'
-import { createAnalysisLayer, renderBufferOverlay } from './layers/analysis'
+import {
+  createCoverageLayer,
+  createNearbyLayer,
+  renderCoverageOverlay,
+  renderNearbyOverlay,
+  renderStationBufferOverlay,
+  setStationBufferSelection,
+  stationBufferLayer,
+} from './layers/analysis'
 import { createBusRouteLayer, createBusStopLayer, createBusStopNameLayer } from './layers/bus'
 import {
   createSelectedRouteLayer,
@@ -58,10 +67,19 @@ import {
 } from './layers/selectedBus'
 import { createMeasureLayer } from './measure/measureLayer'
 import { MeasureController } from './measure/measureController'
+import { createTransitLayer, renderTransitPlan } from './layers/transit'
+import type { TransitPlanResult } from '@/common/types/transit'
+
 import type VectorLayer from 'ol/layer/Vector'
 import type VectorSource from 'ol/source/Vector'
 import type TileLayer from 'ol/layer/Tile'
 import type TileWMS from 'ol/source/TileWMS'
+
+interface RouteMarker {
+  overlay: Overlay
+  el: HTMLDivElement
+}
+
 export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEngine {
   readonly mode: MapMode = '2d'
 
@@ -88,7 +106,22 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   private networkMode: NetworkMode = 'metro'
   /** 图层开关的期望状态（最终可见性还需与网络模式求交） */
   private visibility: Record<LayerId, boolean> = { ...DEFAULT_LAYER_VISIBILITY }
-  private analysisSource: VectorSource | null = null
+  /** 覆盖分析图层（逐站缓冲区 + 并集轮廓） */
+  private coverageLayer: VectorLayer<VectorSource> | null = null
+  private coverageSource: VectorSource | null = null
+  /** 附近站点分析图层 */
+  private nearbyLayer: VectorLayer<VectorSource> | null = null
+  private nearbySource: VectorSource | null = null
+  /** 分析选点模式（附近站点查询） */
+  private pickPointMode = false
+  /** 路线规划选点模式 */
+  private routePickMode = false
+  /** 路线规划图层 */
+  private transitLayer: VectorLayer<VectorSource> | null = null
+  private transitSource: VectorSource | null = null
+  /** 起终点选点标记（DOM Overlay：与点击坐标像素级对齐，不依赖矢量重绘） */
+  private routeOriginMarker: RouteMarker | null = null
+  private routeDestinationMarker: RouteMarker | null = null
   private measureSource: VectorSource | null = null
   private measure: MeasureController | null = null
   private eventKeys: EventsKey[] = []
@@ -106,8 +139,10 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
 
     const basemap = createBaseMapGroup(DEFAULT_BASEMAP_ID)
     this.basemap = basemap
-    const analysis = createAnalysisLayer()
+    const coverage = createCoverageLayer()
+    const nearby = createNearbyLayer()
     const measure = createMeasureLayer()
+    const transit = createTransitLayer()
     this.roads = createRoadLayer(routeCollection)
     this.stations = createStationLayer(stopCollection)
     this.stationLabels = createStationLabelLayer(stopCollection)
@@ -122,8 +157,13 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.selectedBusRouteLayer = createSelectedRouteLayer(this.selectedBusRouteSource)
     this.selectedBusStopLayer = createSelectedRouteStopLayer(this.selectedBusStopSource)
     this.selectedBusNameLayer = createSelectedRouteNameLayer(this.selectedBusNameSource)
-    this.analysisSource = analysis.source
+    this.coverageLayer = coverage.layer
+    this.coverageSource = coverage.source
+    this.nearbyLayer = nearby.layer
+    this.nearbySource = nearby.source
     this.measureSource = measure.source
+    this.transitLayer = transit.layer
+    this.transitSource = transit.source
 
     const map = new Map({
       target: container,
@@ -145,8 +185,11 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
         this.roads,
         this.stations,
         this.stationLabels,
-        analysis.layer,
+        coverage.layer,
+        nearby.layer,
+        stationBufferLayer,
         measure.layer,
+        transit.layer,
         // 选中公交线路叠加层（必须最上层）
         this.selectedBusRouteLayer,
         this.selectedBusStopLayer,
@@ -155,6 +198,8 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     })
 
     this.map = map
+    this.routeOriginMarker = this.createRouteMarker(map, '起', '#E5484D')
+    this.routeDestinationMarker = this.createRouteMarker(map, '终', '#D32F2F')
     // 初始按「地铁」网络装配可见性，避免公交 WMS 与地铁图层同时出现
     this.applyVisibility()
 
@@ -181,6 +226,16 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
 
     this.eventKeys.push(
       map.on('click', (evt) => {
+        // 路线规划选点模式：点击位置作为起点 / 终点
+        if (this.routePickMode) {
+          this.emit('routePickPoint', evt.coordinate as LngLat)
+          return
+        }
+        // 分析选点模式：点击位置作为附近站点查询中心
+        if (this.pickPointMode) {
+          this.emit('pickPoint', evt.coordinate as LngLat)
+          return
+        }
         // 测量取点期间不触发对象点选
         if (this.measure?.active) return
         const hit = map.forEachFeatureAtPixel(
@@ -219,8 +274,8 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
         this.emit('pointer', [lon, lat] as [number, number])
         const el = map.getTargetElement()
         if (!el) return
-        // 测量状态统一使用十字光标
-        if (this.measure?.active) {
+        // 测量 / 分析选点状态统一使用十字光标
+        if (this.measure?.active || this.pickPointMode || this.routePickMode) {
           el.style.cursor = 'crosshair'
           return
         }
@@ -317,6 +372,11 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
 
   setSelected(target: SelectedObject | null): void {
     styleState.selectedId = target?.id ?? null
+    const kind = target?.kind === 'station' ? 'metro'
+      : target?.kind === 'busStop' ? 'bus'
+        : target?.kind === 'road' ? 'metro'
+          : target?.kind === 'busRoute' ? 'bus' : null
+    setStationBufferSelection(target && kind ? { kind, id: target.id } : null)
     this.roads?.changed()
     this.stations?.changed()
     this.stationLabels?.changed()
@@ -385,12 +445,97 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.applyVisibility()
   }
 
-  renderBuffer(overlay: BufferOverlay | null): void {
-    if (!this.analysisSource) return
-    styleState.analysisHitIds = new Set(overlay?.hitIds ?? [])
-    renderBufferOverlay(this.analysisSource, overlay)
-    this.roads?.changed()
-    this.stations?.changed()
+  /* ---------------- 空间分析 ---------------- */
+
+  setPickPointMode(active: boolean): void {
+    this.pickPointMode = active
+    if (active) this.routePickMode = false
+    const el = this.map?.getTargetElement()
+    if (el && !this.measure?.active) el.style.cursor = active ? 'crosshair' : ''
+  }
+
+  setRoutePickMode(active: boolean): void {
+    this.routePickMode = active
+    if (active) this.pickPointMode = false
+    const el = this.map?.getTargetElement()
+    if (el && !this.measure?.active) el.style.cursor = active ? 'crosshair' : ''
+  }
+
+  /** 渲染路线规划结果与起终点标记；有结果时自动缩放到路线范围 */
+  renderRoutePlan(
+    result: TransitPlanResult | null,
+    selectedId: string | null,
+    origin: LngLat | null = null,
+    destination: LngLat | null = null,
+  ): void {
+    const start = origin ?? result?.origin ?? null
+    const end = destination ?? result?.destination ?? null
+    // 尚未出规划结果时起点用红色选点标记，出结果后转为绿色起点
+    const picking = !result || !result.alternatives.length
+    this.setRouteMarker(this.routeOriginMarker, start, '起', picking ? '#E5484D' : '#2E7D32')
+    this.setRouteMarker(this.routeDestinationMarker, end, '终', '#D32F2F')
+
+    if (!this.transitSource) return
+    renderTransitPlan(this.transitSource, result, selectedId)
+    if (!result) return
+    const extent = this.transitSource.getExtent()
+    if (extent && extent.every((n) => Number.isFinite(n))) {
+      this.map?.getView().fit(extent, { padding: [90, 90, 90, 90], maxZoom: 16, duration: 600 })
+    }
+  }
+
+  /** 创建起终点 DOM 标记：锚定地图坐标，点击后无需等待矢量图层重绘 */
+  private createRouteMarker(map: Map, label: string, color: string): RouteMarker {
+    const el = document.createElement('div')
+    el.textContent = label
+    el.style.cssText = [
+      'width:18px;height:18px;border-radius:50%',
+      'display:flex;align-items:center;justify-content:center',
+      `background:${color};border:2px solid #fff;color:#fff`,
+      'font:600 11px/1 "PingFang SC","Microsoft YaHei",sans-serif',
+      'box-shadow:0 1px 6px rgba(10,16,28,.55);pointer-events:none',
+    ].join(';')
+    const overlay = new Overlay({
+      element: el,
+      positioning: 'center-center',
+      stopEvent: false,
+    })
+    map.addOverlay(overlay)
+    return { overlay, el }
+  }
+
+  private setRouteMarker(
+    marker: RouteMarker | null,
+    point: LngLat | null,
+    label: string,
+    color: string,
+  ): void {
+    if (!marker) return
+    marker.el.textContent = label
+    marker.el.style.background = color
+    marker.overlay.setPosition(point ? [point[0], point[1]] : undefined)
+  }
+
+  renderNearbyStops(result: NearbyStopsResult | null): void {
+    if (this.nearbySource) renderNearbyOverlay(this.nearbySource, result)
+  }
+
+  renderStationBuffer(result: import('@/common/types/analysis').StationBufferResult | null): void {
+    renderStationBufferOverlay(result)
+  }
+
+  renderCoverage(result: CoverageResult | null, opacity: number): void {
+    if (!this.coverageSource) return
+    renderCoverageOverlay(this.coverageSource, result)
+    this.coverageLayer?.setOpacity(result ? opacity : 1)
+  }
+
+  setCoverageOpacity(opacity: number): void {
+    this.coverageLayer?.setOpacity(opacity)
+  }
+
+  flyToPoint(point: LngLat, zoom = 16): void {
+    this.map?.getView().animate({ center: point, zoom, duration: 500 })
   }
 
   setMeasureMode(mode: MeasureMode | null): void {
@@ -479,7 +624,16 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.selectedBusRouteSource = null
     this.selectedBusStopSource = null
     this.selectedBusNameSource = null
-    this.analysisSource = null
+    this.coverageLayer = null
+    this.coverageSource = null
+    this.nearbyLayer = null
+    this.nearbySource = null
+    this.pickPointMode = false
+    this.routePickMode = false
+    this.routeOriginMarker = null
+    this.routeDestinationMarker = null
+    this.transitLayer = null
+    this.transitSource = null
     this.measureSource = null
     this.clear()
   }

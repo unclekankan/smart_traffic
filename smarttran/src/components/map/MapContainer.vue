@@ -38,8 +38,19 @@ async function mountEngine(mode: MapMode): Promise<void> {
   next.setNetworkMode(store.networkMode)
   for (const id of LAYER_IDS) next.setLayerVisible(id, store.layerVisibility[id])
   next.setSelected(store.selected)
-  next.renderBuffer(store.bufferOverlay)
   next.setMeasureMode(store.measureMode === 'none' ? null : store.measureMode)
+  // 回放空间分析叠加层
+  next.setPickPointMode?.(store.nearbyPickMode)
+  next.setRoutePickMode?.(store.routePickTarget !== null)
+  next.renderRoutePlan?.(
+    store.routePlanResult,
+    store.routeSelectedId,
+    store.routeOrigin,
+    store.routeDestination,
+  )
+  next.renderNearbyStops?.(store.nearbyResult)
+  next.renderStationBuffer?.(store.stationBufferResult)
+  next.renderCoverage?.(store.coverageResult, store.coverageOpacity)
   // 选中公交路线叠加层（异步，不阻塞 mount）
   void next.selectBusRoute?.(store.selectedBusRoute)
   next.setBusRouteStopsVisible?.(store.busRouteStopsVisible)
@@ -56,6 +67,10 @@ function bindEvents(e: MapEngine): void {
   e.on('select', (sel) => store.select(sel))
   e.on('pointer', (p) => store.setPointer(p))
   e.on('measure', (result) => store.setMeasureResult(result))
+  // 附近站点查询：地图选点 → 以该点为中心查询
+  e.on('pickPoint', (point) => void store.pickNearbyCenter(point))
+  // 路线规划：地图选点 → 起点 / 终点坐标
+  e.on('routePickPoint', (point) => void store.pickRoutePoint(point))
 }
 
 /* ---------------- 监听 store → 引擎 ---------------- */
@@ -109,9 +124,51 @@ watch(
 )
 
 watch(
-  () => store.bufferOverlay,
-  (overlay) => engine?.renderBuffer(overlay),
-  { deep: true },
+  () => store.nearbyPickMode,
+  (active) => engine?.setPickPointMode?.(active),
+)
+
+watch(
+  () => store.nearbyResult,
+  (result) => engine?.renderNearbyStops?.(result),
+)
+
+watch(
+  () => store.stationBufferResult,
+  (result) => engine?.renderStationBuffer?.(result),
+)
+
+watch(
+  () => store.routePickTarget,
+  (target) => engine?.setRoutePickMode?.(target !== null),
+)
+
+watch(
+  () => [
+    store.routePlanResult,
+    store.routeSelectedId,
+    store.routeOrigin,
+    store.routeDestination,
+  ] as const,
+  ([result, selectedId, origin, destination]) =>
+    engine?.renderRoutePlan?.(result, selectedId, origin, destination),
+)
+
+watch(
+  () => store.coverageResult,
+  (result) => engine?.renderCoverage?.(result, store.coverageOpacity),
+)
+
+watch(
+  () => store.coverageOpacity,
+  (opacity) => engine?.setCoverageOpacity?.(opacity),
+)
+
+watch(
+  () => store.focusPointSeq,
+  () => {
+    if (store.focusPoint) engine?.flyToPoint?.(store.focusPoint, 16)
+  },
 )
 
 watch(

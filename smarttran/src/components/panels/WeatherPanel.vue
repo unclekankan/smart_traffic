@@ -6,13 +6,15 @@
  * 展示：顶部成都市概览，下方各区县网格卡片。
  */
 
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { fetchChengduWeather, type WeatherNow } from '@/common/services/weather'
 
 const list = ref<WeatherNow[]>([])
 const loading = ref(false)
 const error = ref('')
 const updatedAt = ref('')
+const selectedDistrict = ref<string | null>(null)
+const districtWeather = computed(() => list.value.find((item) => item.name === selectedDistrict.value) ?? null)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -43,6 +45,18 @@ onMounted(load)
     <div v-if="loading && !list.length" class="state">加载中…</div>
     <div v-else-if="error" class="state error">{{ error }}</div>
 
+    <template v-else-if="districtWeather">
+      <button class="back-btn" @click="selectedDistrict = null">← 返回区县列表</button>
+      <div class="detail">
+        <div class="detail-title">{{ districtWeather.name }}</div>
+        <div class="detail-current"><span>{{ districtWeather.icon }}</span><strong>{{ districtWeather.temperatureC.toFixed(1) }}°C</strong><span>{{ districtWeather.text }}</span></div>
+        <div class="detail-metrics">
+          <div><span>相对湿度</span><strong>{{ districtWeather.humidity }}%</strong></div>
+          <div><span>风速</span><strong>{{ districtWeather.windSpeedKmh.toFixed(1) }} km/h</strong></div>
+        </div>
+      </div>
+    </template>
+
     <template v-else-if="list.length">
       <!-- 成都市概览 -->
       <div class="city-card">
@@ -59,14 +73,18 @@ onMounted(load)
 
       <!-- 区县网格 -->
       <div class="district-grid">
-        <div v-for="d in list.slice(1)" :key="d.name" class="district-card">
+        <button
+          v-for="d in list.slice(1)" :key="d.name"
+          class="district-card" :aria-label="`查看${d.name}天气详情`"
+          @click="selectedDistrict = d.name"
+        >
           <div class="d-name">{{ d.name }}</div>
           <div class="d-row">
             <span class="d-icon">{{ d.icon }}</span>
             <span class="d-temp">{{ d.temperatureC.toFixed(0) }}°</span>
           </div>
           <div class="d-text">{{ d.text }}</div>
-        </div>
+        </button>
       </div>
     </template>
   </div>
@@ -130,11 +148,30 @@ onMounted(load)
   gap: 8px;
 }
 .district-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  color: inherit;
   background: #0d1424;
   border: 1px solid #1b2a41;
   border-radius: 6px;
   padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color .15s, background-color .15s;
 }
+.district-card:hover, .district-card:focus-visible { border-color: #35c8e8; background: #111c30; outline: none; }
+.back-btn { margin-bottom: 12px; padding: 6px 8px; color: #8aa0be; background: #111c30; border: 1px solid #1b2a41; border-radius: 4px; cursor: pointer; }
+.back-btn:hover { color: #35c8e8; border-color: #35c8e8; }
+.detail { padding: 14px; background: #0d1424; border: 1px solid #1b2a41; border-radius: 6px; }
+.detail-title { color: #e8f1fb; font-size: 15px; font-weight: 600; }
+.detail-current { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: #8aa0be; }
+.detail-current span:first-child { font-size: 30px; }
+.detail-current strong { color: #e8f1fb; font-size: 24px; }
+.detail-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.detail-metrics div { padding: 9px; background: #111c30; border-radius: 4px; }
+.detail-metrics span, .detail-metrics strong { display: block; }
+.detail-metrics span { color: #6d85a6; font-size: 10px; }
+.detail-metrics strong { margin-top: 4px; color: #c5d4e8; font-size: 12px; }
 .d-name { font-size: 11px; color: #8aa0be; margin-bottom: 4px; }
 .d-row { display: flex; align-items: center; gap: 6px; }
 .d-icon { font-size: 16px; }

@@ -5,6 +5,7 @@
  * 点击切换 store.railView，工作台右侧（属性面板位）显示对应功能面板：
  * - workbench  工作台（默认属性面板）
  * - layers     图层（底图切换 + 图层开关，面板悬浮于地图左上）
+ * - route      路线规划（地图选点 + 公交 / 地铁方案）
  * - analysis   空间分析（页面框架）
  * - measure    测量（测距 / 测面积，OpenLayers 原生交互）
  * - weather    天气（成都 + 各区县实时天气）
@@ -17,6 +18,7 @@ interface NavItem { key: RailView; label: string; icon: string }
 const items: NavItem[] = [
   { key: 'workbench', label: '工作台', icon: '🗂' },
   { key: 'layers', label: '图层', icon: '🗺' },
+  { key: 'route', label: '路线', icon: '🧭' },
   { key: 'analysis', label: '空间分析', icon: '📊' },
   { key: 'measure', label: '测距', icon: '📏' },
   { key: 'weather', label: '天气', icon: '🌦' },

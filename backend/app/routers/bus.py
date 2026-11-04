@@ -76,6 +76,46 @@ def get_routes(q: str | None = Query(default=None, description="线路名/起终
 
 
 # ------------------------------------------------------------------ #
+# 公交站详情：所属线路由空间距离推断
+# ------------------------------------------------------------------ #
+
+@router.get("/stops/{stop_id}", summary="公交站点详情及附近线路")
+def get_stop_detail(stop_id: str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT id, stop_cn, stop_en, stop_id, num, city_cn, city_en
+                FROM {SCHEMA}.chengdu_bus_stops_unique
+                WHERE stop_id = %s
+                LIMIT 1
+                """,
+                (stop_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"公交站 {stop_id} 不存在")
+            stop = dict(row)
+            cur.execute(
+                f"""
+                SELECT r.id, r.route_cn AS name,
+                       ST_Distance(r.geom::geography, s.geom::geography) AS distance_m
+                FROM {SCHEMA}.chengdu_bus_routes r
+                JOIN {SCHEMA}.chengdu_bus_stops_unique s
+                  ON s.stop_id = %s
+                WHERE ST_DWithin(r.geom::geography, s.geom::geography, %s)
+                ORDER BY distance_m, r.id
+                """,
+                (stop_id, STOP_DISTANCE_M),
+            )
+            lines = [
+                {"id": r["id"], "name": r["name"], "distance_m": round(float(r["distance_m"]), 1)}
+                for r in cur.fetchall()
+            ]
+    return {"stop": stop, "lines": lines, "line_count": len(lines), "line_distance_m": STOP_DISTANCE_M}
+
+
+# ------------------------------------------------------------------ #
 # 地图点击拾取：按经纬度找最近的公交线路
 # ------------------------------------------------------------------ #
 

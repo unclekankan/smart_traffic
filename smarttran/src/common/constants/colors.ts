@@ -34,3 +34,17 @@ export const PALETTE = {
   /** 弱化文本 */
   textMuted: '#5A7192',
 } as const
+
+/**
+ * 缓冲区覆盖热力色带（按覆盖层数 1 → 5+ 由浅到深）
+ *
+ * 与参考的热力覆盖图一致：稀疏区域为浅冰蓝，覆盖层数越多颜色越暖越深，
+ * 色带内部无描边，相邻色块连成一片。
+ */
+export const COVERAGE_RAMP = [
+  { fill: '#9FD8F0', stroke: '#9FD8F0' }, // 1 层：浅冰蓝
+  { fill: '#79CF9A', stroke: '#79CF9A' }, // 2 层：浅绿
+  { fill: '#F3E36B', stroke: '#F3E36B' }, // 3 层：浅黄
+  { fill: '#F5A83D', stroke: '#F5A83D' }, // 4 层：橙色
+  { fill: '#E2491F', stroke: '#E2491F' }, // 5 层及以上：深红
+] as const

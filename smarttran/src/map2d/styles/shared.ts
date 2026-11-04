@@ -1,7 +1,7 @@
 /**
  * 2D 样式共享状态与工具
  *
- * 样式函数需要响应「选中 / 分析命中」两类运行时状态。
+ * 样式函数需要响应「选中」运行时状态。
  * 状态变更由引擎写入此处，并触发对应图层 changed() 重新求值，
  * 避免每次重建样式对象。
  */
@@ -11,8 +11,6 @@ import { PALETTE } from '@/common/constants/colors'
 export const styleState = {
   /** 当前选中的要素 id（地铁线路 / 站点共用命名空间） */
   selectedId: null as string | null,
-  /** 缓冲区分析命中的要素 id */
-  analysisHitIds: new Set<string>(),
 }
 
 /** hex → rgba(alpha 0-1) */

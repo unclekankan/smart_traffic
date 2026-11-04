@@ -26,6 +26,10 @@ export const busApi = {
   },
 
   /** 单条线路详情：线路 GeoJSON + 沿线站点 GeoJSON FeatureCollection */
+  async getStop(id: string): Promise<any> {
+    return request(`/api/bus/stops/${encodeURIComponent(id)}`)
+  },
+
   async getRoute(id: number | string): Promise<BusRouteDetail> {
     const body = await request<BusRouteDetail>(`/api/bus/routes/${id}`)
     // 确保 route.geometry 是 GeoJSON 对象（后端直接用 ST_AsGeoJSON 拼）

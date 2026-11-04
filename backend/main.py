@@ -7,7 +7,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import metro, bus
+from app.routers import analysis, metro, bus, transit
 
 app = FastAPI(title="智慧交通后端", version="0.1.0")
 
@@ -22,6 +22,8 @@ app.add_middleware(
 
 app.include_router(metro.router)
 app.include_router(bus.router)
+app.include_router(analysis.router)
+app.include_router(transit.router)
 
 
 @app.get("/", tags=["health"])

@@ -9,6 +9,8 @@
 import type { CameraState, LngLat } from './geo'
 import type { MeasureMode, MeasureResult } from './measure'
 import type { NetworkMode } from './network'
+import type { CoverageResult, NearbyStopsResult, StationBufferResult } from './analysis'
+import type { TransitPlanResult } from './transit'
 import type { LayerId } from '../constants/layers'
 
 export type MapMode = '2d' | '3d'
@@ -22,16 +24,6 @@ export interface SelectedObject {
   name: string
 }
 
-/** 缓冲区分析结果（渲染载荷） */
-export interface BufferOverlay {
-  /** 缓冲圆心 */
-  center: LngLat
-  /** 半径（米） */
-  radiusM: number
-  /** 命中对象 id 列表（用于高亮） */
-  hitIds: string[]
-}
-
 /** 引擎事件表：上层通过 on() 订阅 */
 export interface MapEngineEvents {
   /** 用户点选了地图对象（null 表示清除选择） */
@@ -40,6 +32,10 @@ export interface MapEngineEvents {
   pointer: LngLat | null
   /** 测量结果变化（null 表示已清除） */
   measure: MeasureResult | null
+  /** 分析选点：附近站点查询模式下点击地图返回的坐标 */
+  pickPoint: LngLat
+  /** 路线规划选点：点击地图返回起 / 终点坐标 */
+  routePickPoint: LngLat
   /** 引擎初始化完成 */
   ready: void
 }
@@ -66,8 +62,34 @@ export interface MapEngine {
   /** 外部驱动选中态（如「定位线路」按钮），引擎负责高亮与聚焦动画 */
   setSelected(target: SelectedObject | null): void
 
-  /** 渲染 / 清除缓冲区覆盖物 */
-  renderBuffer(overlay: BufferOverlay | null): void
+  /** 开启 / 关闭分析选点模式（开启后点击地图发出 pickPoint 事件） */
+  setPickPointMode?(active: boolean): void
+
+  /** 开启 / 关闭路线规划选点模式（开启后点击地图发出 routePickPoint 事件） */
+  setRoutePickMode?(active: boolean): void
+
+  /** 渲染路线规划结果与起终点标记（markers 在无规划结果时也会显示） */
+  renderRoutePlan?(
+    result: TransitPlanResult | null,
+    selectedId: string | null,
+    origin?: LngLat | null,
+    destination?: LngLat | null,
+  ): void
+
+  /** 渲染 / 清除附近站点分析覆盖物（null 表示清除） */
+  renderNearbyStops?(result: NearbyStopsResult | null): void
+
+  /** 渲染 / 清除单站缓冲区分析结果 */
+  renderStationBuffer?(result: StationBufferResult | null): void
+
+  /** 渲染 / 清除站点缓冲区覆盖物（opacity 为图层不透明度 0-1） */
+  renderCoverage?(result: CoverageResult | null, opacity: number): void
+
+  /** 调整缓冲区图层不透明度 */
+  setCoverageOpacity?(opacity: number): void
+
+  /** 飞行到指定坐标（附近站点列表定位） */
+  flyToPoint?(point: LngLat, zoom?: number): void
 
   /** 启用 / 关闭测量交互（mode 为 null 时关闭） */
   setMeasureMode(mode: MeasureMode | null): void

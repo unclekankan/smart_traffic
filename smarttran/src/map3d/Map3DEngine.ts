@@ -20,7 +20,6 @@ import {
 } from '@/common/data/metroRepository'
 import type { CameraState } from '@/common/types/geo'
 import type {
-  BufferOverlay,
   MapEngine,
   MapEngineEvents,
   MapMode,
@@ -34,7 +33,6 @@ import { toRad } from '@/tools'
 import { GRID_STYLE, MAP3D_CAMERA, zoomToHeight } from './config/viewer'
 import { createRoadEntities, positionsFromPath } from './entities/roads'
 import { createAllStations } from './entities/stations'
-import { renderBufferEntity } from './entities/analysis'
 
 const ACCENT = Cesium.Color.fromCssColorString(PALETTE.accent)
 const ACCENT_LIGHT = Cesium.Color.fromCssColorString(PALETTE.accentLight)
@@ -246,10 +244,6 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
         height: 1,
       },
     })
-  }
-
-  renderBuffer(overlay: BufferOverlay | null): void {
-    if (this.viewer) renderBufferEntity(this.viewer.entities, overlay)
   }
 
   /** 3D 在线底图切换：后续接入（当前为程序化网格底面） */

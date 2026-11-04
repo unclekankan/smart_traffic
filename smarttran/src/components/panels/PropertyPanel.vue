@@ -10,8 +10,14 @@
 
 import { computed, ref, watch } from 'vue'
 
-import { getRoute, getStop, getStopsOfRoute } from '@/common/data/metroRepository'
+import {
+  allRouteFeatures,
+  getRoute,
+  getStop,
+  getStopsOfRoute,
+} from '@/common/data/metroRepository'
 import { getRouteDetail, getRouteSummary } from '@/common/data/busRepository'
+import { busApi } from '@/common/services/bus'
 import type { BusRouteDetail } from '@/common/types/bus'
 import { baseLineName, shortLineName } from '@/common/utils/lineName'
 import { useMapStore } from '@/stores/mapStore'
@@ -87,6 +93,32 @@ const station = computed<(MetroStopProps & { name: string }) | null>(() => {
   return getStop(selected.id) ?? null
 })
 
+/** 站点详情「返回线路」的目标线路：优先最近一次选中，其次按途经线路名匹配 */
+const stationBackRoute = computed<{ id: string; name: string } | null>(() => {
+  const last = store.lastMetroRouteId
+  if (last) {
+    const route = getRoute(last)
+    if (route) return { id: String(route.id), name: route.name }
+  }
+  const firstLine = station.value?.lines[0]
+  if (!firstLine) return null
+  const matched = allRouteFeatures().features.find(
+    (f) => baseLineName(f.properties.route_cn) === firstLine.name,
+  )
+  if (!matched) return null
+  return {
+    id: String(matched.properties.id),
+    name: matched.properties.route_cn ?? firstLine.name,
+  }
+})
+
+/** 从地铁站点详情返回所属线路 */
+function backToStationRoute(): void {
+  const target = stationBackRoute.value
+  if (!target) return
+  store.focus({ kind: 'road', id: target.id, name: target.name })
+}
+
 /* ---------------- 公交：线路 / 站点详情（复用同一套 UI） ---------------- */
 
 /** 选中公交线路的详情（线路 GeoJSON + 沿线有序站点），按需拉取 */
@@ -108,6 +140,7 @@ const busRoute = computed(() => {
 })
 
 /** 当前选中的公交站点（从当前线路的沿线站点中查找，取序号与距离） */
+const busStopInfo = ref<any>(null)
 const busStop = computed(() => {
   const selected = store.selected
   if (selected?.kind !== 'busStop') return null
@@ -115,18 +148,31 @@ const busStop = computed(() => {
   const index = features.findIndex((f) => f.properties.stop_id === selected.id)
   const props = index >= 0 ? features[index]?.properties : undefined
   return {
-    name: selected.name,
+    name: busStopInfo.value?.stop?.stop_cn ?? selected.name,
     stopId: selected.id,
     index: index >= 0 ? index + 1 : null,
     total: features.length || null,
-    lineCount: props?.num ?? null,
-    city: props?.city_cn ?? '成都',
-    distance: props?.distance_m ?? null,
-    routeName:
-      busDetail.value?.route.properties.route_cn ??
-      (store.selectedBusRoute ? (getRouteSummary(store.selectedBusRoute)?.route_cn ?? '') : ''),
+    lineCount: busStopInfo.value?.line_count ?? props?.num ?? null,
+    city: busStopInfo.value?.stop?.city_cn ?? props?.city_cn ?? '成都',
+    routeNames: busStopInfo.value?.lines?.map((r: any) => r.name) ?? [],
+    routeName: busDetail.value?.route.properties.route_cn ?? '',
+    status: '数据未提供',
   }
 })
+
+watch(
+  () => store.selected?.kind === 'busStop' ? store.selected.id : null,
+  async (id) => {
+    busStopInfo.value = null
+    if (!id) return
+    try {
+      busStopInfo.value = await busApi.getStop(id)
+    } catch {
+      busStopInfo.value = null
+    }
+  },
+  { immediate: true },
+)
 
 /** 当前选中公交线路 id（作为详情拉取的 key，切换线路时重置旧数据） */
 const selectedBusRouteId = computed(() =>
@@ -369,8 +415,12 @@ function locate(): void {
       <p class="hint" v-if="station.line_count >= 2">该站为换乘站，可在 3D 场景查看体块示意。</p>
 
       <div class="action-row">
-        <button class="btn primary" @click="store.runBufferAnalysis()">⭕ 缓冲区分析</button>
-        <button class="btn ghost" @click="locate">📍 定位站点</button>
+        <button class="btn primary" @click="locate">📍 定位站点</button>
+        <button
+          class="btn ghost"
+          :disabled="!stationBackRoute"
+          @click="backToStationRoute"
+        >← 返回线路</button>
       </div>
     </div>
 
@@ -465,8 +515,8 @@ function locate(): void {
       <div class="kv-grid">
         <div class="kv"><span class="k">所属城市</span><span class="v">{{ busStop.city }}</span></div>
         <div class="kv"><span class="k">途经线路数</span><span class="v">{{ busStop.lineCount ?? '—' }} 条</span></div>
-        <div class="kv"><span class="k">所属线路</span><span class="v">{{ busStop.routeName || '—' }}</span></div>
-        <div class="kv"><span class="k">沿线序号</span><span class="v">{{ busStop.index ? `${busStop.index} / ${busStop.total}` : '—' }}</span></div>
+        <div class="kv"><span class="k">所属线路</span><span class="v">{{ busStop.routeNames.join('、') || busStop.routeName || '—' }}</span></div>
+        <div class="kv"><span class="k">运营状态</span><span class="v">{{ busStop.status }}</span></div>
       </div>
 
       <div class="section">

@@ -7,7 +7,7 @@
 
 export type Listener<T> = T extends void ? () => void : (payload: T) => void
 
-export class TypedEmitter<Events extends Record<string, any>> {
+export class TypedEmitter<Events extends object> {
   private listeners = new Map<keyof Events, Set<(payload: never) => void>>()
 
   /** 订阅事件，返回取消订阅函数 */

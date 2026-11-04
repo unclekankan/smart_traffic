@@ -3,7 +3,7 @@
  *
  * 地图舞台上的浮动面板由左侧功能栏（SideRail → store.railView）驱动：
  * layers → 图层面板，analysis → 空间分析框架，
- * measure → 测距占位，weather → 天气面板。
+ * route → 路线规划，measure → 测距占位，weather → 天气面板。
  */
 
 <script setup lang="ts">
@@ -17,6 +17,8 @@ import LayerPanel from '@/components/panels/LayerPanel.vue'
 import PropertyPanel from '@/components/panels/PropertyPanel.vue'
 import AnalysisPanel from '@/components/panels/AnalysisPanel.vue'
 import AnalysisHomePanel from '@/components/panels/AnalysisHomePanel.vue'
+import NearbyResultsPanel from '@/components/panels/NearbyResultsPanel.vue'
+import RoutePlanPanel from '@/components/panels/RoutePlanPanel.vue'
 import MeasurePanel from '@/components/panels/MeasurePanel.vue'
 import WeatherPanel from '@/components/panels/WeatherPanel.vue'
 import BusRouteList from '@/components/panels/BusRouteList.vue'
@@ -37,12 +39,15 @@ const store = useMapStore()
         <!-- 左侧功能面板：切换时淡入淡出 + 轻微下滑 -->
         <Transition name="float-panel">
           <LayerPanel v-if="store.railView === 'layers'" key="layers" />
+          <RoutePlanPanel v-else-if="store.railView === 'route'" key="route" />
           <AnalysisHomePanel v-else-if="store.railView === 'analysis'" key="analysis" />
           <MeasurePanel v-else-if="store.railView === 'measure'" key="measure" />
           <WeatherPanel v-else-if="store.railView === 'weather'" key="weather" />
         </Transition>
-        <MapLegend />
+        <!-- 覆盖分析结果面板自带色带图例，此时隐藏左下角基础图例避免遮挡 -->
+        <MapLegend v-if="!store.coverageResult" />
         <AnalysisPanel />
+        <NearbyResultsPanel v-if="store.railView === 'analysis' && (store.nearbyResult || store.stationBufferResult)" />
         <!-- 公交线路：线路列表 + 选中线路控制弹窗 -->
         <BusRouteList />
         <BusRouteControlPopup />
