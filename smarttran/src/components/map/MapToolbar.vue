@@ -4,7 +4,7 @@
  *
  * 网络切换与图层管理面板联动：切到「公交」后，图层面板展示
  * 公交线路 / 公交站点两个 GeoServer WMS 图层开关。
- * 3D 暂未实现时按钮置灰（保留接口位）。
+ * 3D 为 Cesium 三维场景（相机范围限定成都市域，三维操作不受限）。
  */
 
 import { useMapStore } from '@/stores/mapStore'
@@ -41,10 +41,12 @@ function toggleFullscreen(): void {
         :class="{ active: store.mode === '2d' }"
         @click="store.setMode('2d')"
       >2D</button>
-      <button class="mode-btn" :class="{ active: store.mode === '3d' }" disabled>
-        3D
-        <span class="tag">即将上线</span>
-      </button>
+      <button
+        class="mode-btn"
+        :class="{ active: store.mode === '3d' }"
+        title="Cesium 三维场景：可自由平移 / 旋转 / 俯仰，范围限定成都市域"
+        @click="store.setMode('3d')"
+      >3D</button>
     </div>
     <div class="tool-actions">
       <button class="tool-btn" @click="store.requestResetView()" title="视角复位">
@@ -94,12 +96,6 @@ function toggleFullscreen(): void {
 .mode-btn:disabled {
   opacity: .5;
   cursor: not-allowed;
-}
-.tag {
-  font-size: 10px;
-  background: rgba(255,255,255,.12);
-  padding: 1px 6px;
-  border-radius: 8px;
 }
 .tool-actions {
   display: flex;

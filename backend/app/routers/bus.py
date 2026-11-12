@@ -85,7 +85,8 @@ def get_stop_detail(stop_id: str):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT id, stop_cn, stop_en, stop_id, num, city_cn, city_en
+                SELECT id, stop_cn, stop_en, stop_id, num, city_cn, city_en,
+                       ST_X(geom) AS lon, ST_Y(geom) AS lat
                 FROM {SCHEMA}.chengdu_bus_stops_unique
                 WHERE stop_id = %s
                 LIMIT 1

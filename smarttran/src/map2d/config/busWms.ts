@@ -5,8 +5,8 @@
  * 视图投影 EPSG:4326，与地图视图一致，无需额外重投影。
  */
 
-/** GeoServer WMS 根地址（GetMap 由 OpenLayers TileWMS 自动拼接） */
-export const BUS_WMS_URL = 'http://localhost:8080/geoserver/smart_triffic/wms'
+/** Same-origin GeoServer WMS path; the dev server proxies it to GeoServer. */
+export const BUS_WMS_URL = '/geoserver/smart_triffic/wms'
 
 /** 公交 WMS 图层名 */
 export const BUS_WMS_LAYERS = {

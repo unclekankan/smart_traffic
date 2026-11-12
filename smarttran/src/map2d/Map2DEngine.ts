@@ -7,6 +7,7 @@
  */
 
 import Map from 'ol/Map'
+import { fromLonLat } from 'ol/proj'
 import View from 'ol/View'
 import Overlay from 'ol/Overlay'
 import ScaleLine from 'ol/control/ScaleLine'
@@ -32,7 +33,7 @@ import type {
   MapMode,
   SelectedObject,
 } from '@/common/types/engine'
-import type { MeasureMode } from '@/common/types/measure'
+import type { MeasureAnnotation, MeasureMode } from '@/common/types/measure'
 import type { NetworkMode } from '@/common/types/network'
 import { DEFAULT_LAYER_VISIBILITY, type LayerId } from '@/common/constants/layers'
 import { useMapStore } from '@/stores/mapStore'
@@ -104,6 +105,7 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   private busRouteNamesVisible = true
   /** 当前交通网络 */
   private networkMode: NetworkMode = 'metro'
+  private busPickRequestGeneration = 0
   /** 图层开关的期望状态（最终可见性还需与网络模式求交） */
   private visibility: Record<LayerId, boolean> = { ...DEFAULT_LAYER_VISIBILITY }
   /** 覆盖分析图层（逐站缓冲区 + 并集轮廓） */
@@ -206,7 +208,9 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.measure = new MeasureController({
       map,
       source: measure.source,
-      onResult: (result) => this.emit('measure', result),
+      onDraft: (result) => this.emit('measure', result),
+      onComplete: (annotation) => this.emit('measureComplete', annotation),
+      onUpdate: (annotation) => this.emit('measureUpdate', annotation),
     })
 
     this.bindInteractions(map)
@@ -226,6 +230,7 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
 
     this.eventKeys.push(
       map.on('click', (evt) => {
+        const busPickGeneration = ++this.busPickRequestGeneration
         // 路线规划选点模式：点击位置作为起点 / 终点
         if (this.routePickMode) {
           this.emit('routePickPoint', evt.coordinate as LngLat)
@@ -251,10 +256,10 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
           },
           { hitTolerance: 4 },
         )
-        this.emit(
-          'select',
-          hit ? this.toObject(hit.layerId, hit.id, hit.props) : null,
-        )
+        if (hit) {
+          this.emit('select', this.toObject(hit.layerId, hit.id, hit.props))
+          return
+        }
         // 未命中矢量要素时，公交模式下再向后端反查最近的公交线路
         // （公交线路是 GeoServer WMS 瓦片，前端无法直接命中要素）
         if (!hit && this.networkMode === 'bus' && this.busRoutes?.getVisible()) {
@@ -262,8 +267,10 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
           const resolution = view.getResolution() ?? 0
           // 按当前分辨率换算约 6px 的容差（视图为 EPSG:4326，1° ≈ 111km）
           const tolerance = Math.round(Math.min(300, Math.max(20, resolution * 111000 * 6)))
-          void this.pickBusRouteAt(evt.coordinate as [number, number], tolerance)
+          void this.pickBusRouteAt(evt.coordinate as [number, number], tolerance, busPickGeneration)
+          return
         }
+        this.emit('select', null)
       }),
     )
 
@@ -296,16 +303,17 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   private async pickBusRouteAt(
     coordinate: [number, number],
     tolerance: number,
+    generation: number,
   ): Promise<void> {
     try {
       const { busApi } = await import('@/common/services/bus')
       const picked = await busApi.pickRoute(coordinate[0], coordinate[1], tolerance)
-      if (!picked) return
-      this.emit('select', {
+      if (generation !== this.busPickRequestGeneration) return
+      this.emit('select', picked ? {
         kind: 'busRoute',
         id: String(picked.id),
         name: picked.route_cn,
-      })
+      } : null)
     } catch {
       // 后端不可用时静默失败，不影响地图其余交互
     }
@@ -371,6 +379,10 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   }
 
   setSelected(target: SelectedObject | null): void {
+    this.updateSelectionStyle(target)
+  }
+
+  private updateSelectionStyle(target: SelectedObject | null): void {
     styleState.selectedId = target?.id ?? null
     const kind = target?.kind === 'station' ? 'metro'
       : target?.kind === 'busStop' ? 'bus'
@@ -546,6 +558,16 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.measure?.clear()
   }
 
+  /** 同步已完成测量标注（2D 独立渲染管线：矢量图层 + Text 标注） */
+  renderMeasureAnnotations(annotations: MeasureAnnotation[], selectedId: string | null): void {
+    this.measure?.renderAnnotations(annotations, selectedId)
+  }
+
+  /** 进入 / 退出标注顶点编辑（ol/interaction/Modify） */
+  setMeasureEditing(annotationId: string | null): void {
+    this.measure?.setEditing(annotationId)
+  }
+
   /* ---------------- 底图 ---------------- */
 
   setBaseMap(id: string): void {
@@ -575,6 +597,33 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   }
 
   /** 地图内定位到指定对象（属性面板「定位」按钮） */
+  private async locateBusStop(stopId: string): Promise<void> {
+    const existingFeature = this.selectedBusStopSource?.getFeatures()
+      .find((feature) => String(feature.get('stop_id')) === stopId)
+    const existingGeometry = existingFeature?.getGeometry()
+    if (existingGeometry && this.map) {
+      const [minX, minY, maxX, maxY] = existingGeometry.getExtent()
+      if (minX === undefined || minY === undefined || maxX === undefined || maxY === undefined) return
+      if (![minX, minY, maxX, maxY].every(Number.isFinite)) return
+      this.map.getView().animate({ center: [(minX + maxX) / 2, (minY + maxY) / 2], zoom: 16, duration: 500 })
+      return
+    }
+    try {
+      const { lon, lat } = await (await import('@/common/services/bus')).busApi.getStopLocation(stopId)
+      this.map?.getView().animate({ center: fromLonLat([lon, lat]), zoom: 16, duration: 500 })
+    } catch {
+      // Keep the current camera when stop coordinates are unavailable.
+    }
+  }
+
+  private async locateBusRoute(id: number): Promise<void> {
+    await this.selectBusRoute(id)
+    const source = this.selectedBusRouteSource
+    const extent = source?.getExtent()
+    if (!source || source.isEmpty() || !extent?.every((n) => Number.isFinite(n)) || !this.map) return
+    this.map.getView().fit(extent, { padding: [80, 80, 80, 80], maxZoom: 15, duration: 600 })
+  }
+
   flyToObject(target: SelectedObject): void {
     const view = this.map?.getView()
     if (!view) return
@@ -585,33 +634,21 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
       const center = getStopPoint(target.id)
       if (center) view.animate({ center, zoom: 16, duration: 600 })
     } else if (target.kind === 'busRoute') {
-      // 选中公交线路：按叠加层几何范围适配
-      const extent = this.selectedBusRouteSource?.getExtent()
-      if (extent && extent.every((n) => Number.isFinite(n))) {
-        view.fit(extent, { padding: [80, 80, 80, 80], maxZoom: 15, duration: 600 })
-      }
+      void this.locateBusRoute(Number(target.id))
     } else if (target.kind === 'busStop') {
-      // 选中公交站点：居中放大到该站
-      const feature = this.selectedBusStopSource
-        ?.getFeatures()
-        .find((f) => String(f.get('stop_id')) === target.id)
-      const geom = feature?.getGeometry()
-      if (!geom) return
-      const [minX = 0, minY = 0, maxX = 0, maxY = 0] = geom.getExtent()
-      view.animate({
-        center: [(minX + maxX) / 2, (minY + maxY) / 2],
-        zoom: 16,
-        duration: 500,
-      })
+      void this.locateBusStop(target.id)
     }
   }
 
   destroy(): void {
+    this.busPickRequestGeneration++
+    this.updateSelectionStyle(null)
     this.eventKeys.forEach((k) => unByKey(k))
     this.eventKeys = []
     this.measure?.destroy()
     this.measure = null
-    this.map?.setTarget(undefined)
+    // 传 null 才会从容器移除 ol-viewport（undefined 只解除引用，残留节点会挤占后续引擎布局）
+    this.map?.setTarget(null)
     this.map = null
     this.basemap = null
     this.roads = this.stations = this.stationLabels = null

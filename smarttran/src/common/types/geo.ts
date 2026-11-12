@@ -50,4 +50,10 @@ export interface CameraState {
   lat: number
   /** 视角尺度：2D 为 OpenLayers zoom，3D 为相机高度（米） */
   scale: number
+  /** 精确 3D 相机高度（米）；用于恢复原视角 */
+  height?: number
+  /** 3D 相机姿态（弧度）；2D 不设置 */
+  heading?: number
+  pitch?: number
+  roll?: number
 }

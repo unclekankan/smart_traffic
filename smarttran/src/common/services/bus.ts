@@ -30,6 +30,11 @@ export const busApi = {
     return request(`/api/bus/stops/${encodeURIComponent(id)}`)
   },
 
+  async getStopLocation(id: string): Promise<{ lon: number; lat: number }> {
+    const result = await request<{ stop: { lon: number; lat: number } }>(`/api/bus/stops/${encodeURIComponent(id)}`)
+    return result.stop
+  },
+
   async getRoute(id: number | string): Promise<BusRouteDetail> {
     const body = await request<BusRouteDetail>(`/api/bus/routes/${id}`)
     // 确保 route.geometry 是 GeoJSON 对象（后端直接用 ST_AsGeoJSON 拼）

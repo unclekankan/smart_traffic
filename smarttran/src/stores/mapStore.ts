@@ -15,7 +15,7 @@ import { DEFAULT_LAYER_VISIBILITY, LAYER_IDS, type LayerId } from '@/common/cons
 import type { MapMode, SelectedObject } from '@/common/types/engine'
 import type { NetworkMode } from '@/common/types/network'
 import type { CameraState, LngLat } from '@/common/types/geo'
-import type { MeasureMode, MeasureResult } from '@/common/types/measure'
+import type { MeasureAnnotation, MeasureMode, MeasureResult } from '@/common/types/measure'
 import type {
   CoverageKind,
   CoverageResult,
@@ -35,6 +35,80 @@ export type RailView = 'workbench' | 'layers' | 'analysis' | 'route' | 'measure'
 /** 路线规划地图选点目标 */
 export type RoutePickTarget = 'origin' | 'destination'
 
+/**
+ * 附近站点查询的单视图状态
+ *
+ * 2D / 3D 各持有一份（nearbyByMode），查询参数、结果缓存、选点状态
+ * 与在途请求完全隔离，切换模式时不共享、不污染。
+ */
+export interface NearbyQueryState {
+  /** 搜索半径（米） */
+  radius: number
+  /** 查询中心点（null 表示尚未选点） */
+  center: LngLat | null
+  /** 查询结果（按距离升序） */
+  result: NearbyStopsResult | null
+  /** 地图选点模式：开启后点击地图将作为查询中心 */
+  pickMode: boolean
+  loading: boolean
+  error: string | null
+}
+
+function createNearbyQueryState(): NearbyQueryState {
+  return { radius: 1000, center: null, result: null, pickMode: false, loading: false, error: null }
+}
+
+/** 各模式在途请求序号：仅最新一次响应允许写回对应模式的状态切片 */
+const nearbyRequestGeneration: Record<MapMode, number> = { '2d': 0, '3d': 0 }
+
+/**
+ * 单站缓冲区分析的单视图状态
+ *
+ * 2D / 3D 各持有一份（stationBufferByMode）：半径参数、分析结果、
+ * 渲染状态与在途请求完全隔离，切换模式时不共享、不残留。
+ */
+export interface StationBufferState {
+  /** 缓冲半径（米） */
+  radius: number
+  /** 当前模式最近一次分析结果（null 表示未分析） */
+  result: StationBufferResult | null
+  loading: boolean
+  error: string | null
+}
+
+function createStationBufferState(): StationBufferState {
+  return { radius: 500, result: null, loading: false, error: null }
+}
+
+/** 各模式缓冲区分析的在途请求序号：仅最新一次响应允许写回该模式 */
+const stationBufferRequestGeneration: Record<MapMode, number> = { '2d': 0, '3d': 0 }
+
+/**
+ * 测量工具的单视图状态
+ *
+ * 2D / 3D 各持有一份（measureByMode）：当前工具、绘制草稿、已完成标注
+ * 与选中 / 编辑状态完全独立；切换地图模式时清理离开模式的全部测量状态。
+ */
+export interface MeasureState {
+  /** 当前测量工具（'none' 表示未启用） */
+  mode: MeasureMode | 'none'
+  /** 绘制中的实时结果（完成后置空并写入 annotations） */
+  draft: MeasureResult | null
+  /** 已完成的可编辑测量标注 */
+  annotations: MeasureAnnotation[]
+  /** 当前选中的标注 id */
+  selectedId: string | null
+  /** 正在顶点编辑的标注 id */
+  editingId: string | null
+}
+
+function createMeasureState(): MeasureState {
+  return { mode: 'none', draft: null, annotations: [], selectedId: null, editingId: null }
+}
+
+/** 标注 id 自增序号（两种模式共用计数器，但各自标注互不共享） */
+let measureAnnotationSeq = 0
+
 export const useMapStore = defineStore('map', {
   state: () => ({
     /** 当前地图模式（2D 默认，对应原型 2D/3D 切换） */
@@ -43,8 +117,16 @@ export const useMapStore = defineStore('map', {
     networkMode: 'metro' as NetworkMode,
     layerVisibility: { ...DEFAULT_LAYER_VISIBILITY } as Record<LayerId, boolean>,
     selected: null as SelectedObject | null,
+    /** 地图高亮选择按视图独立保存；切换模式时不传递选择 */
+    selectedByMode: { '2d': null, '3d': null } as Record<MapMode, SelectedObject | null>,
     /** 最近一次选中的地铁线路 id（站点详情「返回线路」用） */
     lastMetroRouteId: null as string | null,
+    /** 站点详情来源线路，仅用于保留线路高亮 */
+    contextMetroRoute: null as SelectedObject | null,
+    /** 站点详情前一次性保存的地图视角 */
+    stationReturnCamera: null as CameraState | null,
+    /** 站点返回线路请求序号 */
+    stationReturnSeq: 0,
     pointer: null as LngLat | null,
     /** 路网明度（%），映射到地图容器 CSS 亮度滤镜 */
     brightness: 85,
@@ -60,24 +142,20 @@ export const useMapStore = defineStore('map', {
     railView: 'workbench' as RailView,
     /** 场景要素统计（线路 / 站点数量，加载后端数据后刷新） */
     sceneStats: { routes: 0, stops: 0 },
-    /** 测量模式（'none' 表示未启用） */
-    measureMode: 'none' as MeasureMode | 'none',
-    /** 当前测量结果（引擎回调写入） */
-    measureResult: null as MeasureResult | null,
-    /** 清除测量请求序号（MapContainer 监听后驱动引擎） */
+    /** 2D / 3D 各自的测量工具、草稿与标注图层，互不共享 */
+    measureByMode: {
+      '2d': createMeasureState(),
+      '3d': createMeasureState(),
+    } as Record<MapMode, MeasureState>,
+    /** 清除测量请求序号（MapContainer 监听后驱动当前引擎重置绘制） */
     measureClearSeq: 0,
 
-    // ---------- 空间分析：附近站点查询 ---------- //
-    /** 搜索半径（米） */
-    nearbyRadius: 1000,
-    /** 查询中心点（null 表示尚未选点） */
-    nearbyCenter: null as LngLat | null,
-    /** 查询结果（按距离升序） */
-    nearbyResult: null as NearbyStopsResult | null,
-    /** 地图选点模式：开启后点击地图将作为查询中心 */
-    nearbyPickMode: false,
-    nearbyLoading: false,
-    nearbyError: null as string | null,
+    // ---------- 空间分析：附近站点查询（按地图模式隔离） ---------- //
+    /** 2D / 3D 各自的查询参数、结果缓存与选点状态，互不共享 */
+    nearbyByMode: {
+      '2d': createNearbyQueryState(),
+      '3d': createNearbyQueryState(),
+    } as Record<MapMode, NearbyQueryState>,
 
     // ---------- 路线规划 ---------- //
     /** 起点 / 终点（WGS84，由地图点击获得） */
@@ -102,10 +180,11 @@ export const useMapStore = defineStore('map', {
     coverageKind: 'metro' as CoverageKind,
     /** 覆盖分析结果（后端 PostGIS 计算，前端只渲染） */
     coverageResult: null as CoverageResult | null,
-    stationBufferResult: null as StationBufferResult | null,
-    stationBufferRadius: 500,
-    stationBufferLoading: false,
-    stationBufferError: null as string | null,
+    /** 2D / 3D 各自的缓冲区分析参数、结果与加载状态，互不共享 */
+    stationBufferByMode: {
+      '2d': createStationBufferState(),
+      '3d': createStationBufferState(),
+    } as Record<MapMode, StationBufferState>,
     coverageLoading: false,
     coverageError: null as string | null,
     /** 缓冲区图层透明度（0.05 - 1，默认偏高以保证颜色鲜艳） */
@@ -126,10 +205,87 @@ export const useMapStore = defineStore('map', {
     busRouteNamesVisible: true,
   }),
 
+  getters: {
+    /** 当前模式的附近查询状态切片（2D / 3D 各自独立，面板只读当前模式） */
+    nearbyState(): NearbyQueryState {
+      return this.nearbyByMode[this.mode]
+    },
+    nearbyRadius(): number {
+      return this.nearbyState.radius
+    },
+    nearbyCenter(): LngLat | null {
+      return this.nearbyState.center
+    },
+    nearbyResult(): NearbyStopsResult | null {
+      return this.nearbyState.result
+    },
+    nearbyPickMode(): boolean {
+      return this.nearbyState.pickMode
+    },
+    nearbyLoading(): boolean {
+      return this.nearbyState.loading
+    },
+    nearbyError(): string | null {
+      return this.nearbyState.error
+    },
+
+    /** 当前模式的缓冲区分析状态切片（2D / 3D 各自独立） */
+    stationBufferState(): StationBufferState {
+      return this.stationBufferByMode[this.mode]
+    },
+    stationBufferRadius(): number {
+      return this.stationBufferState.radius
+    },
+    stationBufferResult(): StationBufferResult | null {
+      return this.stationBufferState.result
+    },
+    stationBufferLoading(): boolean {
+      return this.stationBufferState.loading
+    },
+    stationBufferError(): string | null {
+      return this.stationBufferState.error
+    },
+
+    /** 当前模式的测量状态切片（2D / 3D 各自独立） */
+    measureState(): MeasureState {
+      return this.measureByMode[this.mode]
+    },
+    measureMode(): MeasureMode | 'none' {
+      return this.measureState.mode
+    },
+    /** 绘制中的实时测量结果（面板与地图浮层同步展示） */
+    measureResult(): MeasureResult | null {
+      return this.measureState.draft
+    },
+    measureAnnotations(): MeasureAnnotation[] {
+      return this.measureState.annotations
+    },
+    selectedMeasureId(): string | null {
+      return this.measureState.selectedId
+    },
+    measureEditingId(): string | null {
+      return this.measureState.editingId
+    },
+  },
+
   actions: {
     setMode(mode: MapMode): void {
       if (this.mode === mode) return
+      // 模式切换时完整清理离开模式的测量状态与引擎可视化（引擎 destroy 同步移除图形）
+      this.measureByMode[this.mode] = createMeasureState()
+      this.measureClearSeq += 1
       this.mode = mode
+      this.selected = this.selectedByMode[mode]
+    },
+
+    setViewSelection(mode: MapMode, target: SelectedObject | null): void {
+      this.selectedByMode[mode] = target
+    },
+
+    /** 更新业务详情并同步当前地图的独立选择 */
+    setCurrentSelection(target: SelectedObject | null): void {
+      this.selected = target
+      this.selectedByMode[this.mode] = target
     },
 
     /** 切换交通网络：地铁 / 公交（切换后清除选中，避免属性面板残留另一网络的要素） */
@@ -137,7 +293,11 @@ export const useMapStore = defineStore('map', {
       if (this.networkMode === mode) return
       this.networkMode = mode
       this.selected = null
+      this.selectedByMode['2d'] = null
+      this.selectedByMode['3d'] = null
       this.lastMetroRouteId = null
+      this.contextMetroRoute = null
+      this.stationReturnCamera = null
       this.selectedBusRoute = null
       this.lastBusRouteId = null
     },
@@ -152,6 +312,18 @@ export const useMapStore = defineStore('map', {
 
     /** 引擎点选事件入口（不做相机飞行） */
     select(target: SelectedObject | null): void {
+      this.selectForMode(this.mode, target)
+    },
+
+    selectForMode(mode: MapMode, target: SelectedObject | null): void {
+      const previous = this.selectedByMode[mode]
+      if (target?.kind === 'station' && previous?.kind === 'road' && this.networkMode === 'metro') {
+        this.contextMetroRoute = previous
+      } else if (target?.kind !== 'station') {
+        this.contextMetroRoute = null
+        this.stationReturnCamera = null
+      }
+      this.selectedByMode[mode] = target
       this.selected = target
       // 记录最近选中的地铁线路，供站点详情「返回线路」使用
       if (target?.kind === 'road') this.lastMetroRouteId = target.id
@@ -163,20 +335,32 @@ export const useMapStore = defineStore('map', {
       }
     },
 
-    /** 面板主动选中并定位（如关联对象跳转） */
+    /** 面板主动显示对象详情并定位，不覆盖地图引擎独立选择 */
     focus(target: SelectedObject): void {
       this.selected = target
       if (target.kind === 'road') this.lastMetroRouteId = target.id
+      if (target.kind === 'busRoute') {
+        const id = Number(target.id)
+        this.selectedBusRoute = id
+        this.lastBusRouteId = id
+      }
       this.focusSeq += 1
     },
 
-    /** 从地铁站点详情返回最近一次选中的线路（无历史线路时返回 false） */
+    setStationReturnCamera(camera: CameraState | null): void {
+      this.stationReturnCamera = camera
+    },
+
+    /** 从地铁站点详情返回来源线路，并请求恢复进入站点前的视角 */
     backToMetroRoute(): boolean {
-      const id = this.lastMetroRouteId
+      const target = this.contextMetroRoute
+      const id = target?.id ?? this.lastMetroRouteId
       if (id === null) return false
       const route = getRoute(id)
       if (!route) return false
-      this.focus({ kind: 'road', id, name: route.name })
+      this.focus(target ?? { kind: 'road', id, name: route.name })
+      this.contextMetroRoute = null
+      this.stationReturnSeq += 1
       return true
     },
 
@@ -208,90 +392,180 @@ export const useMapStore = defineStore('map', {
     /** 左侧功能栏切换（再次点击同一项回到工作台） */
     setRailView(view: RailView): void {
       this.railView = view
-      // 离开测距面板时自动退出测量状态（已绘制的图形保留）
-      if (view !== 'measure' && this.measureMode !== 'none') this.measureMode = 'none'
-      // 离开空间分析面板时退出选点模式
-      if (view !== 'analysis') this.nearbyPickMode = false
+      // 离开测距面板时退出当前模式的绘制状态（已完成标注保留）
+      if (view !== 'measure' && this.measureMode !== 'none') {
+        this.measureState.mode = 'none'
+        this.measureState.draft = null
+        this.measureState.editingId = null
+      }
+      // 离开空间分析面板时退出当前模式的选点状态（另一模式的选点状态独立保留）
+      if (view !== 'analysis') this.nearbyState.pickMode = false
       // 离开路线规划面板时退出起终点选点
       if (view !== 'route') this.routePickTarget = null
     },
 
-    /** 切换测量模式（同一模式再次点击由面板负责置为 none） */
+    /** 切换当前模式的测量工具；关闭工具只取消草稿，已完成标注保留 */
     setMeasureMode(mode: MeasureMode | 'none'): void {
-      this.measureMode = mode
-      if (mode === 'none') this.measureResult = null
+      const slice = this.measureState
+      slice.mode = mode
+      slice.draft = null
+      slice.editingId = null
+      if (mode === 'none') slice.selectedId = null
     },
 
-    /** 引擎测量结果回调 */
-    setMeasureResult(result: MeasureResult | null): void {
-      this.measureResult = result
+    /** 引擎绘制草稿回调（仅接受当前模式的事件，避免跨模式串扰） */
+    setMeasureDraft(mode: MapMode, result: MeasureResult | null): void {
+      if (mode !== this.mode) return
+      this.measureState.draft = result
     },
 
-    /** 清除测量图形与结果 */
+    /** 完成一次测量：写入当前模式的标注图层，并自动选中 */
+    addMeasureAnnotation(mode: MapMode, annotation: MeasureAnnotation): void {
+      if (mode !== this.mode) return
+      const slice = this.measureState
+      const prefix = annotation.mode === 'area' ? '面积' : '测距'
+      const sameMode = slice.annotations.filter((item) => item.mode === annotation.mode).length + 1
+      const created: MeasureAnnotation = {
+        ...annotation,
+        id: annotation.id || `measure-${++measureAnnotationSeq}`,
+        label: annotation.label || `${prefix} ${sameMode}`,
+        visible: annotation.visible !== false,
+      }
+      slice.annotations.push(created)
+      slice.selectedId = created.id
+      slice.draft = null
+      slice.editingId = null
+    },
+
+    /** 顶点编辑完成：按 id 更新当前模式的标注并重新计算数值 */
+    updateMeasureAnnotation(mode: MapMode, annotation: MeasureAnnotation): void {
+      if (mode !== this.mode) return
+      const slice = this.measureState
+      const index = slice.annotations.findIndex((item) => item.id === annotation.id)
+      if (index < 0) return
+      slice.annotations[index] = { ...slice.annotations[index]!, ...annotation }
+    },
+
+    /** 重命名标注（当前模式） */
+    renameMeasureAnnotation(id: string, label: string): void {
+      const item = this.measureState.annotations.find((annotation) => annotation.id === id)
+      if (!item) return
+      item.label = label.trim() || item.label
+    },
+
+    /** 切换标注文本显隐 */
+    toggleMeasureAnnotationVisible(id: string): void {
+      const item = this.measureState.annotations.find((annotation) => annotation.id === id)
+      if (!item) return
+      item.visible = !item.visible
+    },
+
+    /** 选中标注（null 表示取消选中） */
+    selectMeasureAnnotation(id: string | null): void {
+      const slice = this.measureState
+      slice.selectedId = id
+      if (id === null && slice.editingId !== null) slice.editingId = null
+    },
+
+    /** 进入 / 退出标注顶点编辑（null 表示退出） */
+    setMeasureEditing(id: string | null): void {
+      const slice = this.measureState
+      if (id !== null && !slice.annotations.some((annotation) => annotation.id === id)) return
+      slice.editingId = id
+      if (id !== null) slice.selectedId = id
+    },
+
+    /** 删除单个标注 */
+    removeMeasureAnnotation(id: string): void {
+      const slice = this.measureState
+      const index = slice.annotations.findIndex((annotation) => annotation.id === id)
+      if (index < 0) return
+      slice.annotations.splice(index, 1)
+      if (slice.selectedId === id) slice.selectedId = null
+      if (slice.editingId === id) slice.editingId = null
+    },
+
+    /** 清除当前模式的全部测量图形、标注与草稿（保留当前工具） */
     clearMeasure(): void {
-      this.measureResult = null
+      const slice = this.measureState
+      slice.draft = null
+      slice.annotations = []
+      slice.selectedId = null
+      slice.editingId = null
       this.measureClearSeq += 1
     },
 
     // ---------- 空间分析：附近站点查询 ---------- //
-    /** 选择搜索半径；已有查询中心时按新半径自动重查 */
+    /** 选择搜索半径；已有查询中心时按新半径自动重查（只影响当前模式） */
     setNearbyRadius(radius: number): void {
-      this.nearbyRadius = radius
-      if (this.nearbyCenter) void this.loadNearbyStops()
+      const slice = this.nearbyState
+      slice.radius = radius
+      if (slice.center) void this.loadNearbyStops()
     },
 
     /** 进入地图选点模式（点击地图确定查询中心） */
     startNearbyPick(): void {
       this.routePickTarget = null
-      this.nearbyPickMode = true
-      this.nearbyError = null
+      const slice = this.nearbyState
+      slice.pickMode = true
+      slice.error = null
     },
 
     cancelNearbyPick(): void {
-      this.nearbyPickMode = false
+      this.nearbyState.pickMode = false
     },
 
     /** 引擎选点回调：以该坐标为圆心查询附近站点 */
     async pickNearbyCenter(point: LngLat): Promise<void> {
-      this.nearbyPickMode = false
-      this.nearbyCenter = point
+      const slice = this.nearbyState
+      slice.pickMode = false
+      slice.center = point
       await this.loadNearbyStops()
     },
 
-    /** 调用后端 PostGIS 附近站点查询（距离排序在后端完成） */
+    /**
+     * 调用后端 PostGIS 附近站点查询（距离排序在后端完成）。
+     * 请求发起时锁定所属模式：响应只写回该模式的状态切片，
+     * 跨模式切换期间的在途响应不会污染另一模式的缓存。
+     */
     async loadNearbyStops(): Promise<void> {
-      const center = this.nearbyCenter
+      const mode = this.mode
+      const slice = this.nearbyByMode[mode]
+      const center = slice.center
       if (!center) return
-      this.nearbyLoading = true
-      this.nearbyError = null
+      const generation = ++nearbyRequestGeneration[mode]
+      slice.loading = true
+      slice.error = null
       try {
-        this.nearbyResult = await analysisApi.nearbyStops(
-          center[0],
-          center[1],
-          this.nearbyRadius,
-        )
-        this.nearbyCenter = this.nearbyResult.center
+        const result = await analysisApi.nearbyStops(center[0], center[1], slice.radius)
+        if (generation !== nearbyRequestGeneration[mode]) return
+        slice.result = result
+        slice.center = result.center
       } catch (err) {
-        this.nearbyResult = null
-        this.nearbyError = err instanceof Error ? err.message : '附近站点查询失败'
+        if (generation !== nearbyRequestGeneration[mode]) return
+        slice.result = null
+        slice.error = err instanceof Error ? err.message : '附近站点查询失败'
       } finally {
-        this.nearbyLoading = false
+        if (generation === nearbyRequestGeneration[mode]) slice.loading = false
       }
     },
 
+    /** 清除当前模式的查询状态，并作废其未完成的在途响应 */
     clearNearby(): void {
-      this.nearbyCenter = null
-      this.nearbyResult = null
-      this.nearbyError = null
-      this.nearbyPickMode = false
-      this.nearbyLoading = false
+      nearbyRequestGeneration[this.mode] += 1
+      const slice = this.nearbyState
+      slice.center = null
+      slice.result = null
+      slice.error = null
+      slice.pickMode = false
+      slice.loading = false
     },
 
     /** 定位到附近站点列表中的某一站（地图飞行由引擎完成） */
     focusNearbyStop(stop: NearbyStop): void {
-      this.selected = stop.kind === 'metro'
+      this.setCurrentSelection(stop.kind === 'metro'
         ? { kind: 'station', id: stop.id, name: stop.name }
-        : { kind: 'busStop', id: stop.id, name: stop.name }
+        : { kind: 'busStop', id: stop.id, name: stop.name })
       this.focusPoint = [stop.lon, stop.lat]
       this.focusPointSeq += 1
     },
@@ -299,7 +573,7 @@ export const useMapStore = defineStore('map', {
     // ---------- 路线规划 ---------- //
     /** 进入地图选点：选择起点或终点 */
     startRoutePick(target: RoutePickTarget): void {
-      this.nearbyPickMode = false
+      this.nearbyState.pickMode = false
       this.routePickTarget = target
       this.routePlanError = null
       this.routePlanNotice = null
@@ -420,31 +694,44 @@ export const useMapStore = defineStore('map', {
       this.coverageLoading = false
     },
 
+    /** 选择缓冲半径（仅影响当前模式，切回时恢复各自参数） */
     setStationBufferRadius(radius: number): void {
-      this.stationBufferRadius = radius
+      this.stationBufferState.radius = radius
     },
 
+    /**
+     * 单站缓冲区分析：请求发起时锁定所属模式，半径取自该模式的状态切片，
+     * 响应也只写回该模式；切换模式期间的在途响应不会串到另一模式。
+     */
     async runStationBuffer(stop: { kind: 'metro' | 'bus'; id: string; name: string }): Promise<void> {
-      this.stationBufferLoading = true
-      this.stationBufferError = null
-      this.selected = stop.kind === 'metro'
+      const mode = this.mode
+      const slice = this.stationBufferByMode[mode]
+      const generation = ++stationBufferRequestGeneration[mode]
+      slice.loading = true
+      slice.error = null
+      this.setCurrentSelection(stop.kind === 'metro'
         ? { kind: 'station', id: stop.id, name: stop.name }
-        : { kind: 'busStop', id: stop.id, name: stop.name }
+        : { kind: 'busStop', id: stop.id, name: stop.name })
       try {
-        this.stationBufferResult = await analysisApi.stationBuffer(
-          stop.kind, stop.id, this.stationBufferRadius,
-        )
+        const result = await analysisApi.stationBuffer(stop.kind, stop.id, slice.radius)
+        if (generation !== stationBufferRequestGeneration[mode]) return
+        slice.result = result
       } catch (err) {
-        this.stationBufferResult = null
-        this.stationBufferError = err instanceof Error ? err.message : '缓冲区分析失败'
+        if (generation !== stationBufferRequestGeneration[mode]) return
+        slice.result = null
+        slice.error = err instanceof Error ? err.message : '缓冲区分析失败'
       } finally {
-        this.stationBufferLoading = false
+        if (generation === stationBufferRequestGeneration[mode]) slice.loading = false
       }
     },
 
+    /** 清除当前模式的缓冲区结果，并作废其未完成的在途响应 */
     clearStationBuffer(): void {
-      this.stationBufferResult = null
-      this.stationBufferError = null
+      stationBufferRequestGeneration[this.mode] += 1
+      const slice = this.stationBufferState
+      slice.result = null
+      slice.error = null
+      slice.loading = false
     },
 
     // ---------- 选中公交路线 ---------- //
@@ -453,17 +740,17 @@ export const useMapStore = defineStore('map', {
       this.selectedBusRoute = id
       if (id === null) {
         if (this.selected?.kind === 'busRoute' || this.selected?.kind === 'busStop') {
-          this.selected = null
+          this.setCurrentSelection(null)
         }
         return
       }
       this.lastBusRouteId = id
       const summary = getRouteSummary(id)
-      this.selected = {
+      this.setCurrentSelection({
         kind: 'busRoute',
         id: String(id),
         name: summary?.route_cn ?? '公交线路',
-      }
+      })
     },
     /** 取消选中公交线路：引擎监听 selectedBusRoute 后销毁已加载的 GeoJSON 叠加层 */
     clearBusRoute(): void {
@@ -477,7 +764,7 @@ export const useMapStore = defineStore('map', {
     },
     /** 选中公交站点（属性面板展示站点详情，与地铁站点同一套 UI） */
     selectBusStop(stopId: string, name: string): void {
-      this.selected = { kind: 'busStop', id: stopId, name }
+      this.setCurrentSelection({ kind: 'busStop', id: stopId, name })
     },
     /** 切换选中公交线路的站点符号显隐 */
     setBusRouteStopsVisible(v: boolean): void {

@@ -1,9 +1,12 @@
 /**
  * 三维车站实体
  *
- * 配置了三维模型的车站渲染为 LOD-2 体块（顶棚 / 站体 / 站台三段盒子，
- * 与原型「车站详情 · 三维车站场景」一致），其余渲染为点符号 + 注记。
- * 模型几何为程序化体块，不依赖外部 glTF 资源。
+ * - 普通车站：点符号 + 注记
+ * - 换乘车站：
+ *   1) 若通过 registerStationModel(stopId, modelUrl) 注册了 3D 模型资源（glTF/glb），
+ *      则加载该模型（model: { uri }）替代程序化体块，后续只需传入模型文件即可，
+ *      无需修改核心渲染逻辑。
+ *   2) 未注册模型时，渲染为 LOD-2 体块（顶棚 / 站体 / 站台三段盒子）作为占位。
  */
 
 import * as Cesium from 'cesium'
@@ -15,6 +18,35 @@ import type { MetroStopProps } from '@/common/types/metro'
 
 const ACCENT = Cesium.Color.fromCssColorString(PALETTE.accent)
 const ACCENT_LIGHT = Cesium.Color.fromCssColorString(PALETTE.accentLight)
+
+/* ---------------- 3D 模型导入接口（换乘站） ---------------- */
+
+/**
+ * 换乘站 3D 模型注册表：stop_id → 模型资源 URL（.gltf / .glb）。
+ * 外部只需调用 registerStationModel 传入模型文件地址，createStationEntities
+ * 会自动用 model entity 替换程序化体块，无需改动核心渲染逻辑。
+ */
+const stationModelRegistry = new Map<string, string>()
+
+/** 注册 / 更新指定换乘站的 3D 模型资源 */
+export function registerStationModel(stopId: string, modelUrl: string): void {
+  stationModelRegistry.set(stopId, modelUrl)
+}
+
+/** 注销指定换乘站的 3D 模型（回退为程序化体块） */
+export function unregisterStationModel(stopId: string): void {
+  stationModelRegistry.delete(stopId)
+}
+
+/** 清空全部模型注册 */
+export function clearStationModelRegistry(): void {
+  stationModelRegistry.clear()
+}
+
+/** 查询指定换乘站是否已注册模型资源 */
+export function getStationModelUrl(stopId: string): string | undefined {
+  return stationModelRegistry.get(stopId)
+}
 
 /** 按朝向构造实体姿态（heading 单位：度，顺时针） */
 function orientedPosition(lon: number, lat: number, height: number, headingDeg: number) {
@@ -79,23 +111,42 @@ export function createStationEntities(
   const isTransfer = s.line_count >= 2
 
   if (isTransfer) {
-    // 换乘站用 LOD-2 体块示意
-    const heading = 0
-    for (const part of LOD2_PARTS) {
-      const { position, orientation } = orientedPosition(lon, lat, part.bottom + part.height / 2, heading)
+    const modelUrl = getStationModelUrl(s.stop_id)
+    if (modelUrl) {
+      // 已注册 3D 模型：直接加载 glTF/glb，替代程序化体块
+      const position = Cesium.Cartesian3.fromDegrees(lon, lat, 0)
       created.push(
         container.add({
-          id: `station:${s.stop_id}:part`,
+          id: `station:${s.stop_id}:model`,
           position,
-          orientation,
-          box: {
-            dimensions: new Cesium.Cartesian3(part.length, part.width, part.height),
-            material: new Cesium.ColorMaterialProperty(part.color.withAlpha(0.92)),
-            outline: true,
-            outlineColor: ACCENT.withAlpha(0.55),
+          model: {
+            uri: modelUrl,
+            scale: 1,
+            minimumPixelSize: 64,
+            maximumScale: 20000,
+            runAnimations: false,
           },
         }),
       )
+    } else {
+      // 未注册模型：LOD-2 体块占位（同一站点的体块 id 必须唯一，否则 EntityCollection.add 抛 DeveloperError）
+      const heading = 0
+      LOD2_PARTS.forEach((part, index) => {
+        const { position, orientation } = orientedPosition(lon, lat, part.bottom + part.height / 2, heading)
+        created.push(
+          container.add({
+            id: `station:${s.stop_id}:part:${index}`,
+            position,
+            orientation,
+            box: {
+              dimensions: new Cesium.Cartesian3(part.length, part.width, part.height),
+              material: new Cesium.ColorMaterialProperty(part.color.withAlpha(0.92)),
+              outline: true,
+              outlineColor: ACCENT.withAlpha(0.55),
+            },
+          }),
+        )
+      })
     }
     addLabel(container, s.stop_id, `${s.stop_cn}（换乘）`, lon, lat, 14, true)
   } else {
@@ -104,7 +155,7 @@ export function createStationEntities(
         id: `station:${s.stop_id}`,
         position: Cesium.Cartesian3.fromDegrees(lon, lat, 1),
         point: {
-          pixelSize: 9,
+          pixelSize: 11,
           color: Cesium.Color.fromCssColorString('#0E1626'),
           outlineColor: ACCENT,
           outlineWidth: 2,

@@ -7,7 +7,7 @@
  */
 
 import type { CameraState, LngLat } from './geo'
-import type { MeasureMode, MeasureResult } from './measure'
+import type { MeasureAnnotation, MeasureMode, MeasureResult } from './measure'
 import type { NetworkMode } from './network'
 import type { CoverageResult, NearbyStopsResult, StationBufferResult } from './analysis'
 import type { TransitPlanResult } from './transit'
@@ -30,8 +30,12 @@ export interface MapEngineEvents {
   select: SelectedObject | null
   /** 指针移动（null 表示移出地图） */
   pointer: LngLat | null
-  /** 测量结果变化（null 表示已清除） */
+  /** 测量草稿实时结果（null 表示草稿已清空） */
   measure: MeasureResult | null
+  /** 完成一次测量，生成可编辑标注 */
+  measureComplete: MeasureAnnotation
+  /** 顶点编辑后标注几何 / 数值更新 */
+  measureUpdate: MeasureAnnotation
   /** 分析选点：附近站点查询模式下点击地图返回的坐标 */
   pickPoint: LngLat
   /** 路线规划选点：点击地图返回起 / 终点坐标 */
@@ -61,6 +65,9 @@ export interface MapEngine {
 
   /** 外部驱动选中态（如「定位线路」按钮），引擎负责高亮与聚焦动画 */
   setSelected(target: SelectedObject | null): void
+
+  /** 保留站点详情来源线路的选中高亮（仅支持地铁线路） */
+  setContextRoad?(target: SelectedObject | null): void
 
   /** 开启 / 关闭分析选点模式（开启后点击地图发出 pickPoint 事件） */
   setPickPointMode?(active: boolean): void
@@ -96,6 +103,12 @@ export interface MapEngine {
 
   /** 清除测量图形与结果 */
   clearMeasure(): void
+
+  /** 同步已完成测量标注（由 store 驱动，引擎负责地图渲染） */
+  renderMeasureAnnotations?(annotations: MeasureAnnotation[], selectedId: string | null): void
+
+  /** 进入 / 退出指定标注的顶点编辑模式（null 表示退出） */
+  setMeasureEditing?(annotationId: string | null): void
 
   /** 切换在线底图（id 见 map2d/config/basemaps 注册表） */
   setBaseMap(id: string): void

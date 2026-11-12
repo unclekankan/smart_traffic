@@ -7,14 +7,16 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 
 /**
- * Cesium 静态资源（Workers / Assets / Widgets / ThirdParty）无法被打包器直接处理，
- * 按官方推荐方式复制到构建产物中，并通过 define 注入 CESIUM_BASE_URL 供运行时定位。
+ * Cesium 静态资源（Workers / Assets / Widgets / ThirdParty）无法被打包器直接处理：
+ * - 生产构建：viteStaticCopy 复制到 dist/cesium，运行时基址 /cesium/
+ * - dev 服务器：node_modules 本身就在项目根下，Vite 静态中间件可直接命中，
+ *   直接以 /node_modules/... 作为运行时基址（绕开 vite-plugin-static-copy 的 dev 中间件缺陷）
  */
 const cesiumBuild = 'node_modules/cesium/Build/Cesium'
 const cesiumBaseUrl = 'cesium'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     vue(),
     vueJsx(),
@@ -35,10 +37,18 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      '/geoserver': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
     },
   },
   define: {
-    CESIUM_BASE_URL: JSON.stringify(`/${cesiumBaseUrl}`),
+    CESIUM_BASE_URL: JSON.stringify(
+      command === 'serve'
+        ? `/${cesiumBuild}/`
+        : `/${cesiumBaseUrl}/`,
+    ),
   },
   resolve: {
     alias: {
@@ -57,4 +67,4 @@ export default defineConfig({
     },
     chunkSizeWarningLimit: 4096,
   },
-})
+}))

@@ -116,7 +116,10 @@ const stationBackRoute = computed<{ id: string; name: string } | null>(() => {
 function backToStationRoute(): void {
   const target = stationBackRoute.value
   if (!target) return
-  store.focus({ kind: 'road', id: target.id, name: target.name })
+  if (!store.contextMetroRoute) {
+    store.contextMetroRoute = { kind: 'road', id: target.id, name: target.name }
+  }
+  store.backToMetroRoute()
 }
 
 /* ---------------- 公交：线路 / 站点详情（复用同一套 UI） ---------------- */

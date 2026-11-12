@@ -114,13 +114,6 @@ const coverageSummary = computed(() => {
             <div class="t-desc">按站点类型统计服务区覆盖与重叠情况</div>
           </div>
         </button>
-        <button class="type-card" disabled>
-          <span class="t-icon">🧩</span>
-          <div class="t-info">
-            <div class="t-name">叠加分析<span class="t-badge soon">规划中</span></div>
-            <div class="t-desc">多图层空间叠加，提取交集 / 并集区域</div>
-          </div>
-        </button>
         <button class="type-card ready" @click="store.setRailView('route')">
           <span class="t-icon">🔀</span>
           <div class="t-info">

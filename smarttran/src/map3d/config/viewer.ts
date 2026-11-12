@@ -6,7 +6,7 @@
  * 「三维车站场景」网格地面一致。
  */
 
-import { CHENGDU_CENTER } from '@/map2d/config/view'
+import { CHENGDU_CENTER, CHENGDU_EXTENT } from '@/map2d/config/view'
 import { PALETTE } from '@/common/constants/colors'
 import * as Cesium from 'cesium'
 
@@ -17,6 +17,18 @@ export const MAP3D_CAMERA = {
   height: 65000,
   headingDeg: 0,
   pitchDeg: -55,
+} as const
+
+/**
+ * 相机活动范围约束（仅限制地理范围，不限制三维操作）：
+ * - 相机经纬度始终钳制在成都市域范围内
+ * - 高度限制在 [300m, 300km]，贴近观察与全市概览均可
+ * - 俯仰 / 偏航 / 平移不做任何限制，完整保留三维立体操作
+ */
+export const CAMERA_LIMITS = {
+  extent: CHENGDU_EXTENT,
+  minHeight: 300,
+  maxHeight: 300000,
 } as const
 
 /** 2D zoom ↔ 3D 高度的经验换算（2D/3D 切换时保持视角尺度） */

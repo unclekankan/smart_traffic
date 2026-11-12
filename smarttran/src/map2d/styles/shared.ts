@@ -9,7 +9,7 @@
 import { PALETTE } from '@/common/constants/colors'
 
 export const styleState = {
-  /** 当前选中的要素 id（地铁线路 / 站点共用命名空间） */
+  /** 当前选中的要素 id（地铁线路 / 站点共用命名空间），由 2D 引擎生命周期独占维护 */
   selectedId: null as string | null,
 }
 

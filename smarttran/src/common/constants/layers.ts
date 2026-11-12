@@ -59,21 +59,21 @@ export const BUS_LAYER_REGISTRY: readonly LayerMeta[] = [
     label: '公交线路',
     summary: 'WMS 服务',
     hint: 'smart_triffic:chengdu_bus_routes',
-    modes: ['2d'],
+    modes: ['2d', '3d'],
   },
   {
     id: 'busStops',
     label: '公交站点',
     summary: 'WMS 服务',
     hint: 'smart_triffic:chengdu_bus_stops_unique',
-    modes: ['2d'],
+    modes: ['2d', '3d'],
   },
   {
     id: 'busStopNames',
     label: '公交站点名称',
     summary: 'WMS 服务',
     hint: 'smart_triffic:chengdu_bus_stops_unique_name',
-    modes: ['2d'],
+    modes: ['2d', '3d'],
   },
 ]
 
