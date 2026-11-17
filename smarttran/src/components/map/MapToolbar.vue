@@ -49,7 +49,7 @@ function toggleFullscreen(): void {
       >3D</button>
     </div>
     <div class="tool-actions">
-      <button class="tool-btn" @click="store.requestResetView()" title="视角复位">
+      <button class="tool-btn" :disabled="store.simulation3d.phase !== 'idle'" @click="store.requestResetView()" title="视角复位">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></svg>
       </button>
       <button class="tool-btn" @click="toggleFullscreen" title="全屏">
@@ -113,5 +113,6 @@ function toggleFullscreen(): void {
   cursor: pointer;
   transition: all .2s;
 }
-.tool-btn:hover { color: #35c8e8; border-color: #35c8e8; }
+.tool-btn:hover:not(:disabled) { color: #35c8e8; border-color: #35c8e8; }
+.tool-btn:disabled { opacity: .45; cursor: not-allowed; }
 </style>

@@ -15,8 +15,10 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Map2DEngine } from '@/map2d'
 import { Map3DEngine } from '@/map3d'
 import { DEFAULT_3D_BASEMAP_FALLBACK, DEFAULT_3D_BASEMAP_ID } from '@/map3d/config/basemaps'
-import type { MapEngine } from '@/common/types/engine'
+import type { MapEngine, MetroSimulationEngine } from '@/common/types/engine'
 import type { MapMode } from '@/common/types/engine'
+import type { MetroSimulationState } from '@/common/types/simulation'
+import { getRoutePath } from '@/common/data/metroRepository'
 import { LAYER_IDS } from '@/common/constants/layers'
 import { useMapStore } from '@/stores/mapStore'
 
@@ -29,12 +31,53 @@ const createEngine = (mode: MapMode): MapEngine => mode === '2d'
 
 let engine: MapEngine | null = null
 let engineGeneration = 0
+let simulationUnsubscribe: (() => void) | null = null
+let lastSimulationStart = 0
+
+function simulationEngine(target: MapEngine | null): (MapEngine & MetroSimulationEngine) | null {
+  if (!target || target.mode !== '3d') return null
+  const candidate = target as MapEngine & MetroSimulationEngine
+  return typeof candidate.startMetroSimulation === 'function' ? candidate : null
+}
+
+function bindSimulationState(target: MapEngine, generation: number): void {
+  simulationUnsubscribe?.()
+  simulationUnsubscribe = simulationEngine(target)?.onMetroSimulationStateChange?.((state) => {
+    if (engineGeneration !== generation || engine !== target || target.mode !== '3d') return
+    store.applyMetroSimulationState(lastSimulationStart, { ...state, session: lastSimulationStart })
+  }) ?? null
+}
+
+async function startSimulation(target: MapEngine, generation: number, session: number, routeId: string, routeName: string): Promise<void> {
+  const simEngine = simulationEngine(target)
+  if (!simEngine?.startMetroSimulation || generation !== engineGeneration || target !== engine) return
+  lastSimulationStart = session
+  const initial: MetroSimulationState = { ...store.simulation3d, phase: 'preparing' }
+  store.applyMetroSimulationState(session, initial)
+  simEngine.setMetroSimulationTilesEnabled?.(store.simulation3d.tilesEnabled)
+  try {
+    const path = getRoutePath(routeId)
+    if (!path?.length) throw new Error(`未找到线路 ${routeId} 的有效几何`)
+    await simEngine.startMetroSimulation(routeId, routeName, path)
+    if (generation === engineGeneration && target === engine && store.simulation3d.session === session) {
+      simEngine.setMetroSimulationOtherRoutesVisible?.(false)
+    }
+  } catch (error) {
+    store.applyMetroSimulationState(session, {
+      ...store.simulation3d,
+      phase: 'error',
+      error: error instanceof Error ? error.message : '线路模拟启动失败',
+    })
+  }
+}
 
 async function mountEngine(mode: MapMode): Promise<void> {
   const el = containerRef.value
   if (!el) return
   ready.value = false
   const generation = ++engineGeneration
+  simulationUnsubscribe?.()
+  simulationUnsubscribe = null
   engine?.destroy()
   engine = null
 
@@ -65,13 +108,9 @@ async function mountEngine(mode: MapMode): Promise<void> {
   next.setMeasureEditing?.(store.measureEditingId)
   // 回放空间分析叠加层
   next.setPickPointMode?.(store.nearbyPickMode)
-  next.setRoutePickMode?.(store.routePickTarget !== null)
-  next.renderRoutePlan?.(
-    store.routePlanResult,
-    store.routeSelectedId,
-    store.routeOrigin,
-    store.routeDestination,
-  )
+  const route = store.routeByMode[mode]
+  next.setRoutePickMode?.(route.pickTarget !== null)
+  next.renderRoutePlan?.(route.result, route.selectedId, route.origin, route.destination)
   next.renderNearbyStops?.(store.nearbyResult)
   next.renderStationBuffer?.(store.stationBufferResult)
   next.renderCoverage?.(store.coverageResult, store.coverageOpacity)
@@ -84,6 +123,7 @@ async function mountEngine(mode: MapMode): Promise<void> {
   if (saved) next.applyCameraState(saved)
 
   bindEvents(next)
+  bindSimulationState(next, generation)
   ready.value = true
 }
 
@@ -101,7 +141,7 @@ function bindEvents(e: MapEngine): void {
   // 附近站点查询：地图选点 → 以该点为中心查询
   e.on('pickPoint', (point) => void store.pickNearbyCenter(point))
   // 路线规划：地图选点 → 起点 / 终点坐标
-  e.on('routePickPoint', (point) => void store.pickRoutePoint(point))
+  e.on('routePickPoint', ({ point, mode }) => void store.pickRoutePoint(point, mode))
 }
 
 /* ---------------- 监听 store → 引擎 ---------------- */
@@ -110,6 +150,10 @@ watch(
   () => store.mode,
   async (mode, prev) => {
     if (engine && prev) store.saveCamera(prev, engine.getCameraState())
+    if (mode !== '3d') {
+      simulationEngine(engine)?.stopMetroSimulation?.()
+      store.stopMetroSimulation?.()
+    }
     await mountEngine(mode)
   },
 )
@@ -124,7 +168,13 @@ watch(
 
 watch(
   () => store.networkMode,
-  (mode) => engine?.setNetworkMode(mode),
+  (mode) => {
+    engine?.setNetworkMode(mode)
+    if (mode === 'bus') {
+      simulationEngine(engine)?.stopMetroSimulation?.()
+      store.stopMetroSimulation?.()
+    }
+  },
 )
 
 watch(
@@ -187,19 +237,12 @@ watch(
 )
 
 watch(
-  () => store.routePickTarget,
-  (target) => engine?.setRoutePickMode?.(target !== null),
-)
-
-watch(
-  () => [
-    store.routePlanResult,
-    store.routeSelectedId,
-    store.routeOrigin,
-    store.routeDestination,
-  ] as const,
-  ([result, selectedId, origin, destination]) =>
-    engine?.renderRoutePlan?.(result, selectedId, origin, destination),
+  () => store.routeByMode[store.mode],
+  (route) => {
+    engine?.setRoutePickMode?.(route.pickTarget !== null)
+    engine?.renderRoutePlan?.(route.result, route.selectedId, route.origin, route.destination)
+  },
+  { deep: true },
 )
 
 watch(
@@ -228,7 +271,9 @@ watch(
 
 watch(
   () => store.resetSeq,
-  () => engine?.resetView(),
+  () => {
+    if (store.simulation3d.phase === 'idle') engine?.resetView()
+  },
 )
 
 watch(
@@ -258,10 +303,46 @@ watch(
   (id) => engine?.setMeasureEditing?.(id),
 )
 
+watch(
+  () => store.simulation3d?.session,
+  (session, previous) => {
+    if (session === undefined || session === previous || !store.simulation3d) return
+    if (store.simulation3d.phase === 'preparing' && store.simulation3d.routeId) {
+      if (engine?.mode === '3d') void startSimulation(engine, engineGeneration, session, store.simulation3d.routeId, store.simulation3d.routeName ?? '')
+    } else {
+      simulationEngine(engine)?.stopMetroSimulation?.()
+    }
+  },
+  { immediate: false },
+)
+
+watch(
+  () => store.simulation3d?.tilesEnabled,
+  (enabled) => { if (enabled !== undefined) simulationEngine(engine)?.setMetroSimulationTilesEnabled?.(enabled) },
+)
+
+watch(
+  () => store.simulation3d?.otherRoutesVisible,
+  (visible) => { if (visible !== undefined) simulationEngine(engine)?.setMetroSimulationOtherRoutesVisible?.(visible) },
+)
+
+watch(
+  () => store.simulation3d?.speedMultiplier,
+  (speed) => { if (speed !== undefined) simulationEngine(engine)?.setMetroSimulationSpeedMultiplier?.(speed) },
+)
+
+watch(
+  () => store.simulation3d?.phase,
+  (phase) => { if (phase) simulationEngine(engine)?.setMetroSimulationPaused?.(phase === 'paused') },
+)
+
 onMounted(() => mountEngine(store.mode))
 
 onBeforeUnmount(() => {
   engineGeneration++
+  simulationUnsubscribe?.()
+  simulationUnsubscribe = null
+  simulationEngine(engine)?.stopMetroSimulation?.()
   engine?.destroy()
   engine = null
 })

@@ -266,8 +266,9 @@ function focusStation(id: string): void {
 }
 
 function locate(): void {
-  if (store.selected) store.focus(store.selected)
+  if (store.selected && store.simulation3d.phase === 'idle') store.focus(store.selected)
 }
+
 </script>
 
 <template>
@@ -381,7 +382,7 @@ function locate(): void {
       </div>
 
       <div class="action-row">
-        <button class="btn primary" @click="locate">📍 定位线路</button>
+        <button class="btn primary" :disabled="store.simulation3d.phase !== 'idle'" @click="locate">📍 定位线路</button>
       </div>
     </div>
 

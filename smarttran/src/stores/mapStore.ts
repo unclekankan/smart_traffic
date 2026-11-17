@@ -15,6 +15,7 @@ import { DEFAULT_LAYER_VISIBILITY, LAYER_IDS, type LayerId } from '@/common/cons
 import type { MapMode, SelectedObject } from '@/common/types/engine'
 import type { NetworkMode } from '@/common/types/network'
 import type { CameraState, LngLat } from '@/common/types/geo'
+import type { MetroSimulationState } from '@/common/types/simulation'
 import type { MeasureAnnotation, MeasureMode, MeasureResult } from '@/common/types/measure'
 import type {
   CoverageKind,
@@ -30,10 +31,53 @@ import { getRoute, getSceneStats } from '@/common/data/metroRepository'
 import { getRouteSummary } from '@/common/data/busRepository'
 
 /** 左侧功能栏视图标识 */
-export type RailView = 'workbench' | 'layers' | 'analysis' | 'route' | 'measure' | 'weather'
+export type RailView = 'workbench' | 'layers' | 'analysis' | 'route' | 'measure' | 'weather' | 'simulation'
+
+function createMetroSimulationState(session = 0): MetroSimulationState {
+  return {
+    session,
+    phase: 'idle',
+    routeId: null,
+    routeName: null,
+    tilesEnabled: false,
+    otherRoutesVisible: false,
+    speedMultiplier: 1,
+    model: { phase: 'idle', progress: 0, error: null },
+    tilesStatus: 'idle',
+    error: null,
+  }
+}
 
 /** 路线规划地图选点目标 */
 export type RoutePickTarget = 'origin' | 'destination'
+
+export interface RouteState {
+  origin: LngLat | null
+  destination: LngLat | null
+  pickTarget: RoutePickTarget | null
+  strategy: number
+  result: TransitPlanResult | null
+  selectedId: string | null
+  loading: boolean
+  error: string | null
+  notice: string | null
+}
+
+function createRouteState(): RouteState {
+  return {
+    origin: null,
+    destination: null,
+    pickTarget: null,
+    strategy: 0,
+    result: null,
+    selectedId: null,
+    loading: false,
+    error: null,
+    notice: null,
+  }
+}
+
+const routeRequestGeneration: Record<MapMode, number> = { '2d': 0, '3d': 0 }
 
 /**
  * 附近站点查询的单视图状态
@@ -82,6 +126,39 @@ function createStationBufferState(): StationBufferState {
 
 /** 各模式缓冲区分析的在途请求序号：仅最新一次响应允许写回该模式 */
 const stationBufferRequestGeneration: Record<MapMode, number> = { '2d': 0, '3d': 0 }
+
+/**
+ * 全网服务范围（覆盖分析）的单视图状态
+ *
+ * 2D / 3D 各持有一份（coverageByMode）：半径参数、站点范围、分析结果、
+ * 透明度，切换模式时不共享、不残留。
+ */
+export interface CoverageState {
+  /** 服务半径（米） */
+  radius: number
+  /** 站点范围：地铁站 / 公交站 / 全部 */
+  kind: CoverageKind
+  /** 当前模式最近一次覆盖分析结果（null 表示未分析） */
+  result: CoverageResult | null
+  loading: boolean
+  error: string | null
+  /** 覆盖色带透明度（0.05 - 1） */
+  opacity: number
+}
+
+function createCoverageState(): CoverageState {
+  return {
+    radius: 300,
+    kind: 'metro',
+    result: null,
+    loading: false,
+    error: null,
+    opacity: 0.7,
+  }
+}
+
+/** 各模式覆盖分析的在途请求序号 */
+const coverageRequestGeneration: Record<MapMode, number> = { '2d': 0, '3d': 0 }
 
 /**
  * 测量工具的单视图状态
@@ -149,6 +226,8 @@ export const useMapStore = defineStore('map', {
     } as Record<MapMode, MeasureState>,
     /** 清除测量请求序号（MapContainer 监听后驱动当前引擎重置绘制） */
     measureClearSeq: 0,
+    /** 3D 地铁车辆模拟专属状态，切换模式时不自动恢复 */
+    simulation3d: createMetroSimulationState(),
 
     // ---------- 空间分析：附近站点查询（按地图模式隔离） ---------- //
     /** 2D / 3D 各自的查询参数、结果缓存与选点状态，互不共享 */
@@ -158,37 +237,21 @@ export const useMapStore = defineStore('map', {
     } as Record<MapMode, NearbyQueryState>,
 
     // ---------- 路线规划 ---------- //
-    /** 起点 / 终点（WGS84，由地图点击获得） */
-    routeOrigin: null as LngLat | null,
-    routeDestination: null as LngLat | null,
-    /** 当前正在地图选点的目标（null 表示未在选点） */
-    routePickTarget: null as RoutePickTarget | null,
-    /** 出行策略（0-6，与后端 / 高德一致） */
-    routeStrategy: 0,
-    routePlanResult: null as TransitPlanResult | null,
-    /** 当前选中的方案 id（地图高亮 + 详情面板） */
-    routeSelectedId: null as string | null,
-    routePlanLoading: false,
-    routePlanError: null as string | null,
-    /** 无可用方案等友好引导（非错误态） */
-    routePlanNotice: null as string | null,
+    routeByMode: { '2d': createRouteState(), '3d': createRouteState() } as Record<MapMode, RouteState>,
+
+    // ---------- 空间分析：全网覆盖 ---------- //
+    /** 2D / 3D 各自的覆盖分析参数、结果与透明度，互不共享 */
+    coverageByMode: {
+      '2d': createCoverageState(),
+      '3d': createCoverageState(),
+    } as Record<MapMode, CoverageState>,
 
     // ---------- 空间分析：缓冲区覆盖 ---------- //
-    /** 站点服务半径（米）：300 / 500 / 800 */
-    coverageRadius: 300,
-    /** 分析站点范围 */
-    coverageKind: 'metro' as CoverageKind,
-    /** 覆盖分析结果（后端 PostGIS 计算，前端只渲染） */
-    coverageResult: null as CoverageResult | null,
     /** 2D / 3D 各自的缓冲区分析参数、结果与加载状态，互不共享 */
     stationBufferByMode: {
       '2d': createStationBufferState(),
       '3d': createStationBufferState(),
     } as Record<MapMode, StationBufferState>,
-    coverageLoading: false,
-    coverageError: null as string | null,
-    /** 缓冲区图层透明度（0.05 - 1，默认偏高以保证颜色鲜艳） */
-    coverageOpacity: 0.7,
 
     /** 列表点选后的定位请求（坐标 + 序号，MapContainer 监听） */
     focusPoint: null as LngLat | null,
@@ -246,6 +309,42 @@ export const useMapStore = defineStore('map', {
       return this.stationBufferState.error
     },
 
+    /** 当前模式的覆盖分析状态切片（2D / 3D 各自独立） */
+    coverageState(): CoverageState {
+      return this.coverageByMode[this.mode]
+    },
+    coverageRadius(): number {
+      return this.coverageState.radius
+    },
+    coverageKind(): CoverageKind {
+      return this.coverageState.kind
+    },
+    coverageResult(): CoverageResult | null {
+      return this.coverageState.result
+    },
+    coverageLoading(): boolean {
+      return this.coverageState.loading
+    },
+    coverageError(): string | null {
+      return this.coverageState.error
+    },
+    coverageOpacity(): number {
+      return this.coverageState.opacity
+    },
+
+    routeState(): RouteState {
+      return this.routeByMode[this.mode]
+    },
+    routeOrigin(): LngLat | null { return this.routeState.origin },
+    routeDestination(): LngLat | null { return this.routeState.destination },
+    routePickTarget(): RoutePickTarget | null { return this.routeState.pickTarget },
+    routeStrategy(): number { return this.routeState.strategy },
+    routePlanResult(): TransitPlanResult | null { return this.routeState.result },
+    routeSelectedId(): string | null { return this.routeState.selectedId },
+    routePlanLoading(): boolean { return this.routeState.loading },
+    routePlanError(): string | null { return this.routeState.error },
+    routePlanNotice(): string | null { return this.routeState.notice },
+
     /** 当前模式的测量状态切片（2D / 3D 各自独立） */
     measureState(): MeasureState {
       return this.measureByMode[this.mode]
@@ -271,15 +370,60 @@ export const useMapStore = defineStore('map', {
   actions: {
     setMode(mode: MapMode): void {
       if (this.mode === mode) return
-      // 模式切换时完整清理离开模式的测量状态与引擎可视化（引擎 destroy 同步移除图形）
+      if (mode !== '3d') this.stopMetroSimulation()
+      // 测量与覆盖图形绑定引擎实例；路线业务切片保留以便切回时恢复。
       this.measureByMode[this.mode] = createMeasureState()
       this.measureClearSeq += 1
+      this.coverageByMode[this.mode] = createCoverageState()
       this.mode = mode
       this.selected = this.selectedByMode[mode]
     },
 
     setViewSelection(mode: MapMode, target: SelectedObject | null): void {
       this.selectedByMode[mode] = target
+    },
+
+    startMetroSimulation(routeId: string, routeName: string): number | null {
+      if (this.mode !== '3d' || this.networkMode !== 'metro' || this.simulation3d.phase !== 'idle' || !getRoute(routeId)) return null
+      const session = this.simulation3d.session + 1
+      this.simulation3d = {
+        ...createMetroSimulationState(session),
+        phase: 'preparing',
+        routeId,
+        routeName,
+      }
+      this.railView = 'simulation'
+      return session
+    },
+
+    stopMetroSimulation(): void {
+      const session = this.simulation3d.session + 1
+      this.simulation3d = createMetroSimulationState(session)
+    },
+
+    setMetroSimulationPaused(paused: boolean): void {
+      const state = this.simulation3d
+      if (paused && state.phase === 'running') state.phase = 'paused'
+      else if (!paused && state.phase === 'paused') state.phase = 'running'
+    },
+
+    setMetroSimulationTilesEnabled(enabled: boolean): void {
+      this.simulation3d.tilesEnabled = enabled
+      if (!enabled) this.simulation3d.tilesStatus = 'idle'
+    },
+
+    setMetroSimulationOtherRoutesVisible(visible: boolean): void {
+      this.simulation3d.otherRoutesVisible = visible
+    },
+
+    setMetroSimulationSpeedMultiplier(speed: number): void {
+      this.simulation3d.speedMultiplier = Math.min(4, Math.max(0.25, speed))
+    },
+
+    applyMetroSimulationState(session: number, state: MetroSimulationState): void {
+      if (this.mode !== '3d' || this.networkMode !== 'metro' || session !== this.simulation3d.session
+        || state.session !== session || state.routeId !== this.simulation3d.routeId) return
+      this.simulation3d = { ...state, model: { ...state.model } }
     },
 
     /** 更新业务详情并同步当前地图的独立选择 */
@@ -291,6 +435,7 @@ export const useMapStore = defineStore('map', {
     /** 切换交通网络：地铁 / 公交（切换后清除选中，避免属性面板残留另一网络的要素） */
     setNetworkMode(mode: NetworkMode): void {
       if (this.networkMode === mode) return
+      if (mode === 'bus') this.stopMetroSimulation()
       this.networkMode = mode
       this.selected = null
       this.selectedByMode['2d'] = null
@@ -317,6 +462,8 @@ export const useMapStore = defineStore('map', {
 
     selectForMode(mode: MapMode, target: SelectedObject | null): void {
       const previous = this.selectedByMode[mode]
+      if (mode === '3d' && this.simulation3d.phase !== 'idle'
+        && (target?.kind !== 'road' || target.id !== this.simulation3d.routeId)) this.stopMetroSimulation()
       if (target?.kind === 'station' && previous?.kind === 'road' && this.networkMode === 'metro') {
         this.contextMetroRoute = previous
       } else if (target?.kind !== 'station') {
@@ -400,8 +547,8 @@ export const useMapStore = defineStore('map', {
       }
       // 离开空间分析面板时退出当前模式的选点状态（另一模式的选点状态独立保留）
       if (view !== 'analysis') this.nearbyState.pickMode = false
-      // 离开路线规划面板时退出起终点选点
-      if (view !== 'route') this.routePickTarget = null
+      // 离开路线规划面板时只退出当前模式的选点
+      if (view !== 'route') this.routeState.pickTarget = null
     },
 
     /** 切换当前模式的测量工具；关闭工具只取消草稿，已完成标注保留 */
@@ -505,7 +652,7 @@ export const useMapStore = defineStore('map', {
 
     /** 进入地图选点模式（点击地图确定查询中心） */
     startNearbyPick(): void {
-      this.routePickTarget = null
+      this.routeState.pickTarget = null
       const slice = this.nearbyState
       slice.pickMode = true
       slice.error = null
@@ -571,127 +718,121 @@ export const useMapStore = defineStore('map', {
     },
 
     // ---------- 路线规划 ---------- //
-    /** 进入地图选点：选择起点或终点 */
     startRoutePick(target: RoutePickTarget): void {
       this.nearbyState.pickMode = false
-      this.routePickTarget = target
-      this.routePlanError = null
-      this.routePlanNotice = null
+      this.routeState.pickTarget = target
+      this.routeState.error = null
+      this.routeState.notice = null
     },
 
     cancelRoutePick(): void {
-      this.routePickTarget = null
+      this.routeState.pickTarget = null
     },
 
-    /** 引擎选点回调：写入起点 / 终点，两端齐备后自动规划 */
-    async pickRoutePoint(point: LngLat): Promise<void> {
-      const target = this.routePickTarget
+    async pickRoutePoint(point: LngLat, mode: MapMode): Promise<void> {
+      const slice = this.routeByMode[mode]
+      const target = slice.pickTarget
       if (!target) return
-      if (target === 'origin') this.routeOrigin = point
-      else this.routeDestination = point
-      this.routePickTarget = null
-      this.routePlanResult = null
-      this.routeSelectedId = null
-      this.routePlanNotice = null
-      if (this.routeOrigin && this.routeDestination) await this.loadRoutePlan()
+      if (target === 'origin') slice.origin = point
+      else slice.destination = point
+      slice.pickTarget = null
+      slice.result = null
+      slice.selectedId = null
+      slice.notice = null
+      if (slice.origin && slice.destination) await this.loadRoutePlan(mode)
     },
 
-    /** 交换起点与终点 */
     async swapRouteEndpoints(): Promise<void> {
-      const origin = this.routeOrigin
-      this.routeOrigin = this.routeDestination
-      this.routeDestination = origin
-      if (this.routeOrigin && this.routeDestination) await this.loadRoutePlan()
+      const slice = this.routeState
+      const origin = slice.origin
+      slice.origin = slice.destination
+      slice.destination = origin
+      if (slice.origin && slice.destination) await this.loadRoutePlan(this.mode)
     },
 
     setRouteStrategy(strategy: number): void {
-      if (this.routeStrategy === strategy) return
-      this.routeStrategy = strategy
-      // 已选好起终点时按新策略重新规划
-      if (this.routeOrigin && this.routeDestination) void this.loadRoutePlan()
+      const slice = this.routeState
+      if (slice.strategy === strategy) return
+      slice.strategy = strategy
+      if (slice.origin && slice.destination) void this.loadRoutePlan(this.mode)
     },
 
-    /** 调用后端路线规划（起终点为 WGS84 经纬度） */
-    async loadRoutePlan(): Promise<void> {
-      const origin = this.routeOrigin
-      const destination = this.routeDestination
+    async loadRoutePlan(mode: MapMode): Promise<void> {
+      const slice = this.routeByMode[mode]
+      const origin = slice.origin
+      const destination = slice.destination
       if (!origin || !destination) return
-      this.routePlanLoading = true
-      this.routePlanError = null
-      this.routePlanNotice = null
+      const generation = ++routeRequestGeneration[mode]
+      slice.loading = true
+      slice.error = null
+      slice.notice = null
       try {
-        const result = await transitApi.plan({
-          origin,
-          destination,
-          strategy: this.routeStrategy,
-        })
-        this.routePlanResult = result
-        this.routeSelectedId = result.alternatives[0]?.id ?? null
+        const result = await transitApi.plan({ origin, destination, strategy: slice.strategy })
+        if (routeRequestGeneration[mode] !== generation) return
+        slice.result = result
+        slice.selectedId = result.alternatives[0]?.id ?? null
       } catch (err) {
-        this.routePlanResult = null
-        this.routeSelectedId = null
-        if (err instanceof TransitApiError && err.code === 50003) {
-          // 确实无可用方案：以引导提示展示，不按错误处理
-          this.routePlanNotice = err.message
-        } else {
-          this.routePlanError = err instanceof Error ? err.message : '路线规划失败'
-        }
+        if (routeRequestGeneration[mode] !== generation) return
+        slice.result = null
+        slice.selectedId = null
+        if (err instanceof TransitApiError && err.code === 50003) slice.notice = err.message
+        else slice.error = err instanceof Error ? err.message : '路线规划失败'
       } finally {
-        this.routePlanLoading = false
+        if (routeRequestGeneration[mode] === generation) slice.loading = false
       }
     },
 
     selectRouteAlternative(id: string): void {
-      this.routeSelectedId = id
+      this.routeState.selectedId = id
     },
 
-    /** 清除规划结果与起终点（地图图层同步清空） */
     clearRoutePlan(): void {
-      this.routeOrigin = null
-      this.routeDestination = null
-      this.routePickTarget = null
-      this.routePlanResult = null
-      this.routeSelectedId = null
-      this.routePlanError = null
-      this.routePlanNotice = null
-      this.routePlanLoading = false
+      const mode = this.mode
+      routeRequestGeneration[mode]++
+      this.routeByMode[mode] = createRouteState()
     },
 
-    // ---------- 空间分析：缓冲区覆盖 ---------- //
+    // ---------- 空间分析：全网覆盖 ---------- //
     setCoverageRadius(radius: number): void {
-      this.coverageRadius = radius
+      this.coverageState.radius = radius
     },
 
     setCoverageKind(kind: CoverageKind): void {
-      this.coverageKind = kind
+      this.coverageState.kind = kind
     },
 
-    /** 调整缓冲区图层透明度 */
+    /** 调整覆盖色带透明度 */
     setCoverageOpacity(value: number): void {
-      this.coverageOpacity = Math.min(1, Math.max(0.05, value))
+      this.coverageState.opacity = Math.min(1, Math.max(0.05, value))
     },
 
-    /** 执行覆盖分析：缓冲区、并集、重叠面积与重叠站点均由后端 PostGIS 计算 */
+    /** 执行覆盖分析：后端 PostGIS 计算覆盖层数 / 面积 / 重叠率，结果只写回当前模式 */
     async runCoverageAnalysis(): Promise<void> {
-      this.coverageLoading = true
-      this.coverageError = null
+      const mode = this.mode
+      const slice = this.coverageByMode[mode]
+      const generation = ++coverageRequestGeneration[mode]
+      slice.loading = true
+      slice.error = null
       try {
-        this.coverageResult = await analysisApi.stationBuffers(
-          this.coverageRadius,
-          this.coverageKind,
-        )
+        const result = await analysisApi.stationBuffers(slice.radius, slice.kind)
+        if (coverageRequestGeneration[mode] !== generation) return // 过期响应丢弃
+        slice.result = result
       } catch (err) {
-        this.coverageResult = null
-        this.coverageError = err instanceof Error ? err.message : '缓冲区覆盖分析失败'
+        if (coverageRequestGeneration[mode] !== generation) return
+        slice.result = null
+        slice.error = err instanceof Error ? err.message : '覆盖分析失败'
       } finally {
-        this.coverageLoading = false
+        if (coverageRequestGeneration[mode] === generation) {
+          slice.loading = false
+        }
       }
     },
 
     clearCoverage(): void {
-      this.coverageResult = null
-      this.coverageError = null
-      this.coverageLoading = false
+      const slice = this.coverageState
+      slice.result = null
+      slice.error = null
+      slice.loading = false
     },
 
     /** 选择缓冲半径（仅影响当前模式，切回时恢复各自参数） */

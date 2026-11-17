@@ -334,9 +334,10 @@ export class MeasureController3D {
       draftGroup.line = this.viewer.entities.add({
         id: `${DRAFT_PREFIX}line`,
         polyline: {
-          positions: new Cesium.CallbackProperty(() =>
-            collectPositions('distance', this.points, this.cursorPoint, 2),
-          , false),
+          positions: new Cesium.CallbackProperty(
+            () => collectPositions('distance', this.points, this.cursorPoint, 2),
+            false,
+          ),
           width: 3,
           material: new Cesium.ColorMaterialProperty(ACCENT),
           clampToGround: true,

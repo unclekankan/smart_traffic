@@ -23,6 +23,7 @@ import MeasurePanel from '@/components/panels/MeasurePanel.vue'
 import WeatherPanel from '@/components/panels/WeatherPanel.vue'
 import BusRouteList from '@/components/panels/BusRouteList.vue'
 import BusRouteControlPopup from '@/components/panels/BusRouteControlPopup.vue'
+import MetroSimulationPanel from '@/components/panels/MetroSimulationPanel.vue'
 import { useMapStore } from '@/stores/mapStore'
 
 const store = useMapStore()
@@ -36,6 +37,7 @@ const store = useMapStore()
       <main class="map-stage">
         <MapContainer />
         <MapToolbar />
+        <MetroSimulationPanel />
         <!-- 左侧功能面板：切换时淡入淡出 + 轻微下滑 -->
         <Transition name="float-panel">
           <LayerPanel v-if="store.railView === 'layers'" key="layers" />

@@ -124,7 +124,7 @@ const pickingHint = computed(() => {
     <button
       class="primary"
       :disabled="!store.routeOrigin || !store.routeDestination || store.routePlanLoading"
-      @click="store.loadRoutePlan()"
+      @click="store.loadRoutePlan(store.mode)"
     >
       {{ store.routePlanLoading ? '规划中…' : '开始规划' }}
     </button>

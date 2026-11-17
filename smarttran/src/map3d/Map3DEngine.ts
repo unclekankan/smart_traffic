@@ -25,12 +25,14 @@ import {
   getStopPoint,
 } from '@/common/data/metroRepository'
 import type { CameraState, LngLat } from '@/common/types/geo'
-import type { NearbyStopsResult, StationBufferResult } from '@/common/types/analysis'
+import type { CoverageResult, NearbyStopsResult, StationBufferResult } from '@/common/types/analysis'
 import type { MeasureAnnotation } from '@/common/types/measure'
+import type { TransitPlanResult } from '@/common/types/transit'
 import type {
   MapEngine,
   MapEngineEvents,
   MapMode,
+  MetroSimulationEngine,
   SelectedObject,
 } from '@/common/types/engine'
 import { DEFAULT_LAYER_VISIBILITY, type LayerId } from '@/common/constants/layers'
@@ -46,12 +48,22 @@ import {
   zoomToHeight,
 } from './config/viewer'
 import { createBaseMapLayers3D, DEFAULT_3D_BASEMAP_FALLBACK, DEFAULT_3D_BASEMAP_ID } from './config/basemaps'
-import { createBusRouteEntities, createBusStopEntities, createRoadEntities, removeBusRouteEntities } from './entities/roads'
+import {
+  createBusRouteEntities,
+  createBusStopEntities,
+  createMissingRoadEntities,
+  createRoadEntities,
+  removeBusRouteEntities,
+  removeRoadEntitiesForRoute,
+} from './entities/roads'
 import type { RoadRenderOptions } from './entities/roads'
 import { createAllStations } from './entities/stations'
 import { createNearbyEntities, removeNearbyEntities } from './entities/analysis'
 import { createStationBufferEntities, removeStationBufferEntities } from './entities/stationBuffer'
+import { createCoverageEntities, removeCoverageEntities, setCoverageEntitiesOpacity } from './entities/coverage'
 import { MeasureController3D } from './measure/measureController3D'
+import { createRoutePlanEntities, removeRoutePlanEntities, routePlanPositions } from './entities/routePlan'
+import { MetroSimulationController } from './simulation/MetroSimulationController'
 
 const ACCENT = Cesium.Color.fromCssColorString(PALETTE.accent)
 const ACCENT_LIGHT = Cesium.Color.fromCssColorString(PALETTE.accentLight)
@@ -122,7 +134,7 @@ function bizKeyOf(picked: unknown): string | null {
   return /^(road|station):/.test(key) ? key : null
 }
 
-export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEngine {
+export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEngine, MetroSimulationEngine {
   readonly mode: MapMode = '3d'
 
   private viewer: Cesium.Viewer | null = null
@@ -177,8 +189,17 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   private nearbyEntities: Cesium.Entity[] = []
   /** 单站缓冲区分析覆盖物（本引擎实例独立持有，与 2D 图层互不影响） */
   private stationBufferEntities: Cesium.Entity[] = []
+  /** 全网覆盖分析覆盖物（本引擎实例独立持有，与 2D 的 VectorLayer 完全独立） */
+  private coverageEntities: Cesium.Entity[] = []
+  /** 缓存最近一次渲染的 coverageResult，供 opacity 更新时回读 properties */
+  private coverageResultCache: CoverageResult | null = null
+  private routePlanEntities: Cesium.Entity[] = []
+  private routePlanResult: TransitPlanResult | null = null
+  private routePlanSelectedId: string | null = null
   /** 3D 测量控制器（Cesium 独立实现，与 2D 的 MeasureController 互不共享） */
   private measure3d: MeasureController3D | null = null
+  private simulation: MetroSimulationController | null = null
+  private simulationStateListeners = new Set<(state: import('@/common/types/simulation').MetroSimulationState) => void>()
 
   constructor(
     private readonly onBasemapChange?: (id: string) => void,
@@ -243,6 +264,14 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
       onDraft: (result) => this.emit('measure', result),
       onComplete: (annotation) => this.emit('measureComplete', annotation),
       onUpdate: (annotation) => this.emit('measureUpdate', annotation),
+    })
+    this.simulation = new MetroSimulationController({
+      viewer,
+      entities: viewer.entities,
+      onStateChange: (state) => {
+        this.refreshRoadHighlight()
+        this.simulationStateListeners.forEach((listener) => listener(state))
+      },
     })
     this.resetView()
     this.emit('ready')
@@ -311,7 +340,7 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
       const point = this.screenToLngLat(viewer, movement.position)
       if (point && (this.routePickMode || this.pickPointMode)) {
         // 选点模式：坐标直接供业务使用，不触发对象选中
-        if (this.routePickMode) this.emit('routePickPoint', point)
+        if (this.routePickMode) this.emit('routePickPoint', { point, mode: this.mode })
         else this.emit('pickPoint', point)
         return
       }
@@ -517,6 +546,22 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     if (active) this.pickPointMode = false
   }
 
+  renderRoutePlan(result: TransitPlanResult | null, selectedId: string | null, origin: LngLat | null = null, destination: LngLat | null = null): void {
+    if (!this.viewer) return
+    this.routePlanResult = result
+    this.routePlanSelectedId = selectedId
+    this.routePlanEntities = createRoutePlanEntities(this.viewer.entities, result, selectedId, origin, destination)
+    const alternative = result?.alternatives.find((item) => item.id === selectedId) ?? result?.alternatives[0]
+    if (!alternative) return
+    const positions = routePlanPositions(alternative)
+    if (positions.length) {
+      void this.viewer.camera.flyToBoundingSphere(Cesium.BoundingSphere.fromPoints(positions), {
+        duration: 0.6,
+        offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-35), 1800),
+      })
+    }
+  }
+
   /**
    * 渲染 / 清除附近站点分析覆盖物（null 表示清除）。
    * 先整体移除旧实体再重建，重复渲染不产生残留。
@@ -537,6 +582,26 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.stationBufferEntities = []
     if (!result || !this.viewer) return
     this.stationBufferEntities = createStationBufferEntities(this.viewer.entities, result)
+  }
+
+  /**
+   * 渲染 / 清除全网覆盖分析结果（null 表示清除）。
+   * 3D 独立实现：贴地 PolygonEntity + 覆盖层数色带，完全不依赖 2D 的 VectorLayer。
+   * opacity 控制整组色带的透明度（每个 zone 的 material alpha 独立设置）。
+   */
+  renderCoverage(result: CoverageResult | null, opacity: number): void {
+    if (this.viewer) removeCoverageEntities(this.viewer.entities)
+    this.coverageEntities = []
+    this.coverageResultCache = result
+    if (!result || !this.viewer) return
+    const meta = createCoverageEntities(this.viewer.entities, result, opacity)
+    this.coverageEntities = meta.map((m) => m.entity)
+  }
+
+  /** 调整覆盖色带透明度（只改 material alpha，不重建实体） */
+  setCoverageOpacity(opacity: number): void {
+    if (!this.viewer || this.coverageEntities.length === 0) return
+    setCoverageEntitiesOpacity(this.viewer.entities, opacity)
   }
 
   /** Switch the full network between metro entities and bus WMS layers. */
@@ -695,11 +760,17 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     for (const entity of entities) {
       if (entity.polyline) {
         this.highlightedRoad.push({ entity, material: entity.polyline.material, volume: false })
-        entity.polyline.material = new Cesium.ColorMaterialProperty(ACCENT_LIGHT)
+        const color = this.simulation?.active
+          ? ACCENT_LIGHT.withAlpha(0.6)
+          : ACCENT_LIGHT
+        entity.polyline.material = new Cesium.ColorMaterialProperty(color)
       }
       if (entity.polylineVolume) {
         this.highlightedRoad.push({ entity, material: entity.polylineVolume.material, volume: true })
-        entity.polylineVolume.material = new Cesium.ColorMaterialProperty(ACCENT_LIGHT)
+        const color = this.simulation?.active
+          ? ACCENT_LIGHT.withAlpha(0.6)
+          : ACCENT_LIGHT
+        entity.polylineVolume.material = new Cesium.ColorMaterialProperty(color)
       }
     }
   }
@@ -859,6 +930,7 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
   }
 
   resetView(): void {
+    if (this.simulation?.active) return
     this.viewer?.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(
         MAP3D_CAMERA.lon,
@@ -874,9 +946,74 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     })
   }
 
+  async startMetroSimulation(routeId: string, routeName: string, path: LngLat[]): Promise<void> {
+    if (!this.simulation) return
+    await this.simulation.start(routeId, routeName, path)
+  }
+
+  stopMetroSimulation(): void {
+    this.simulation?.stop()
+    if (!this.viewer) return
+    this.restoreRoadStyle()
+    const existingIds = this.viewer.entities.values.map((entity) => String(entity.id))
+    const restored = createMissingRoadEntities(this.viewer.entities, allRouteFeatures(), existingIds, this.roadRenderOptions)
+    for (const entity of restored) {
+      if (entity.id.startsWith('road:') && !entity.id.includes(':segment:')) {
+        this.entityIndex.set(entity.id, entity)
+      }
+    }
+    this.applyNetworkVisibility()
+    this.refreshRoadHighlight()
+  }
+
+  setMetroSimulationPaused(paused: boolean): void {
+    if (paused) this.simulation?.pause()
+    else this.simulation?.resume()
+  }
+
+  setMetroSimulationTilesEnabled(enabled: boolean): void {
+    this.simulation?.setTilesEnabled(enabled)
+  }
+
+  setMetroSimulationSpeedMultiplier(speed: number): void {
+    this.simulation?.setSpeedMultiplier(speed)
+  }
+
+  setMetroSimulationOtherRoutesVisible(visible: boolean): void {
+    if (!this.viewer || !this.simulation) return
+    this.simulation.setOtherRoutesVisible(visible)
+    const activeRouteId = this.simulation.activeRouteId
+    if (visible) {
+      const existingIds = this.viewer.entities.values.map((entity) => String(entity.id))
+      const restored = createMissingRoadEntities(this.viewer.entities, allRouteFeatures(), existingIds, this.roadRenderOptions)
+      for (const entity of restored) {
+        if (entity.id.startsWith('road:') && !entity.id.includes(':segment:')) {
+          this.entityIndex.set(entity.id, entity)
+        }
+      }
+      this.applyNetworkVisibility()
+    } else {
+      this.restoreRoadStyle()
+      for (const feature of allRouteFeatures().features) {
+        const routeId = String(feature.properties.id)
+        if (routeId === activeRouteId) continue
+        removeRoadEntitiesForRoute(this.viewer.entities, routeId)
+        this.entityIndex.delete(`road:${routeId}`)
+      }
+      if (this.selectedRoadId && this.selectedRoadId !== activeRouteId) this.selectedRoadId = null
+      if (this.contextRoadId && this.contextRoadId !== activeRouteId) this.contextRoadId = null
+      this.refreshRoadHighlight()
+    }
+  }
+
+  onMetroSimulationStateChange(listener: (state: import('@/common/types/simulation').MetroSimulationState) => void): () => void {
+    this.simulationStateListeners.add(listener)
+    return () => this.simulationStateListeners.delete(listener)
+  }
+
   /** 定位到业务对象（线路 → 沿线视角；站点 → 垂直俯视线路方向） */
   flyToObject(target: SelectedObject): void {
-    if (!this.viewer) return
+    if (!this.viewer || this.simulation?.active) return
     if (target.kind === 'busRoute') {
       void this.selectBusRoute(Number(target.id))
       return
@@ -931,6 +1068,14 @@ export class Map3DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
     this.removeSelectedBusRoute()
     this.renderNearbyStops(null)
     this.renderStationBuffer(null)
+    this.renderCoverage(null, 0.7)
+    if (this.viewer) removeRoutePlanEntities(this.viewer.entities)
+    this.routePlanEntities = []
+    this.routePlanResult = null
+    this.routePlanSelectedId = null
+    this.simulation?.destroy()
+    this.simulation = null
+    this.simulationStateListeners?.clear()
     this.measure3d?.destroy()
     this.measure3d = null
     this.clampCallback?.()

@@ -233,7 +233,7 @@ export class Map2DEngine extends TypedEmitter<MapEngineEvents> implements MapEng
         const busPickGeneration = ++this.busPickRequestGeneration
         // 路线规划选点模式：点击位置作为起点 / 终点
         if (this.routePickMode) {
-          this.emit('routePickPoint', evt.coordinate as LngLat)
+          this.emit('routePickPoint', { point: evt.coordinate as LngLat, mode: this.mode })
           return
         }
         // 分析选点模式：点击位置作为附近站点查询中心

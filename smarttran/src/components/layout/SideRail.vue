@@ -24,6 +24,7 @@ const items: NavItem[] = [
   { key: 'weather', label: '天气', icon: '🌦' },
 ]
 
+const simulationItem: NavItem = { key: 'simulation', label: '线路模拟', icon: '▶' }
 const store = useMapStore()
 
 function onClick(item: NavItem): void {
@@ -34,6 +35,15 @@ function onClick(item: NavItem): void {
 
 <template>
   <nav class="side-rail">
+    <button
+      v-if="store.mode === '3d' && store.networkMode === 'metro'"
+      class="rail-btn" :class="{ active: store.railView === simulationItem.key }"
+      :title="simulationItem.label"
+      @click="onClick(simulationItem)"
+    >
+      <span class="ico">{{ simulationItem.icon }}</span>
+      <span class="lbl">{{ simulationItem.label }}</span>
+    </button>
     <button
       v-for="it in items" :key="it.key"
       class="rail-btn" :class="{ active: store.railView === it.key }"

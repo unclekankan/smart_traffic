@@ -38,6 +38,7 @@ vi.mock('@/map2d', () => ({ Map2DEngine: class MockMap2DEngine {
   renderNearbyStops(...args: unknown[]) { this.calls.push(['renderNearbyStops', ...args]) }
   renderStationBuffer(...args: unknown[]) { this.calls.push(['renderStationBuffer', ...args]) }
   renderCoverage(...args: unknown[]) { this.calls.push(['renderCoverage', ...args]) }
+  setCoverageOpacity(...args: unknown[]) { this.calls.push(['setCoverageOpacity', ...args]) }
   selectBusRoute(...args: unknown[]) { this.calls.push(['selectBusRoute', ...args]) }
   setBusRouteStopsVisible(...args: unknown[]) { this.calls.push(['setBusRouteStopsVisible', ...args]) }
   setBusRouteNamesVisible(...args: unknown[]) { this.calls.push(['setBusRouteNamesVisible', ...args]) }
@@ -68,6 +69,7 @@ vi.mock('@/map3d', () => ({ Map3DEngine: class MockMap3DEngine {
   renderNearbyStops(...args: unknown[]) { this.calls.push(['renderNearbyStops', ...args]) }
   renderStationBuffer(...args: unknown[]) { this.calls.push(['renderStationBuffer', ...args]) }
   renderCoverage(...args: unknown[]) { this.calls.push(['renderCoverage', ...args]) }
+  setCoverageOpacity(...args: unknown[]) { this.calls.push(['setCoverageOpacity', ...args]) }
   selectBusRoute(...args: unknown[]) { this.calls.push(['selectBusRoute', ...args]) }
   setBusRouteStopsVisible(...args: unknown[]) { this.calls.push(['setBusRouteStopsVisible', ...args]) }
   setBusRouteNamesVisible(...args: unknown[]) { this.calls.push(['setBusRouteNamesVisible', ...args]) }
@@ -101,6 +103,11 @@ beforeEach(() => {
     selectedMeasureId: null,
     measureEditingId: null,
     nearbyPickMode: false,
+    routeByMode: {
+      '2d': { pickTarget: null, result: null, selectedId: null, origin: null, destination: null },
+      '3d': { pickTarget: null, result: null, selectedId: null, origin: null, destination: null },
+    },
+    routeState: null,
     routePickTarget: null,
     routePlanResult: null,
     routeSelectedId: null,
@@ -109,6 +116,7 @@ beforeEach(() => {
     nearbyResult: null,
     stationBufferResult: null,
     coverageOpacity: 1,
+    coverageResult: null,
     selectedBusRoute: null,
     busRouteStopsVisible: false,
     busRouteNamesVisible: false,
@@ -178,6 +186,31 @@ describe('MapContainer selection bridge', () => {
     expect(restored3D.calls).toContainEqual(['setSelected', selection3D])
     expect(restored3D.calls).not.toContainEqual(['setSelected', selection2D])
 
+    wrapper.unmount()
+  })
+
+  it('replays only the active mode route state and guards route picks by source mode', async () => {
+    const route2D = { alternatives: [{ id: '2d-plan' }] }
+    harness.store.routeByMode['2d'] = {
+      pickTarget: 'origin', result: route2D, selectedId: '2d-plan', origin: [104, 30], destination: [105, 31],
+    }
+    const wrapper = mount(MapContainer, { attachTo: document.body })
+    await flushWatchers()
+    const engine2D = harness.engines[0]
+    expect(engine2D.calls).toContainEqual(['renderRoutePlan', route2D, '2d-plan', [104, 30], [105, 31]])
+    expect(engine2D.calls).toContainEqual(['setRoutePickMode', true])
+
+    harness.store.mode = '3d'
+    harness.store.routeByMode['3d'] = {
+      pickTarget: 'destination', result: null, selectedId: null, origin: [106, 32], destination: null,
+    }
+    await flushWatchers()
+    const engine3D = harness.engines[1]
+    expect(engine3D.calls).toContainEqual(['renderRoutePlan', null, null, [106, 32], null])
+    expect(engine3D.calls).toContainEqual(['setRoutePickMode', true])
+
+    engine2D.listeners.get('routePickPoint')?.({ point: [104.5, 30.5], mode: '2d' })
+    expect(harness.store.pickRoutePoint).toHaveBeenCalledWith([104.5, 30.5], '2d')
     wrapper.unmount()
   })
 

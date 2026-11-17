@@ -12,6 +12,7 @@ import type { NetworkMode } from './network'
 import type { CoverageResult, NearbyStopsResult, StationBufferResult } from './analysis'
 import type { TransitPlanResult } from './transit'
 import type { LayerId } from '../constants/layers'
+import type { MetroSimulationState } from './simulation'
 
 export type MapMode = '2d' | '3d'
 
@@ -38,10 +39,20 @@ export interface MapEngineEvents {
   measureUpdate: MeasureAnnotation
   /** 分析选点：附近站点查询模式下点击地图返回的坐标 */
   pickPoint: LngLat
-  /** 路线规划选点：点击地图返回起 / 终点坐标 */
-  routePickPoint: LngLat
+  /** 路线规划选点：点击地图返回起 / 终点坐标及来源模式 */
+  routePickPoint: { point: LngLat; mode: MapMode }
   /** 引擎初始化完成 */
   ready: void
+}
+
+export interface MetroSimulationEngine {
+  startMetroSimulation?(routeId: string, routeName: string, path: LngLat[]): Promise<void>
+  stopMetroSimulation?(): void
+  setMetroSimulationPaused?(paused: boolean): void
+  setMetroSimulationTilesEnabled?(enabled: boolean): void
+  setMetroSimulationOtherRoutesVisible?(visible: boolean): void
+  setMetroSimulationSpeedMultiplier?(speed: number): void
+  onMetroSimulationStateChange?(listener: (state: MetroSimulationState) => void): () => void
 }
 
 export interface MapEngine {

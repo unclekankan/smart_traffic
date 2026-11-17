@@ -215,6 +215,45 @@ export function removeBusRouteEntities(container: Cesium.EntityCollection): void
 }
 
 /** 清除道路实体 */
+export function getRoadEntityIdsForRoute(routeId: string | number): string[] {
+  const id = String(routeId)
+  return [`road:${id}`, `road:${id}:segment:`, `road-volume:${id}:`]
+}
+
+export function removeRoadEntitiesForRoute(
+  container: Cesium.EntityCollection,
+  routeId: string | number,
+): void {
+  const id = String(routeId)
+  const primary = `road:${id}`
+  const segmentPrefix = `road:${id}:segment:`
+  const volumePrefix = `road-volume:${id}:`
+  container.values
+    .filter((entity): entity is Cesium.Entity & { id: string } => typeof entity.id === 'string'
+      && (entity.id === primary || entity.id.startsWith(segmentPrefix) || entity.id.startsWith(volumePrefix)))
+    .forEach((entity) => container.remove(entity))
+}
+
+export function createMissingRoadEntities(
+  container: Cesium.EntityCollection,
+  features: GeoJSONFeatureCollection<MetroRouteProps>,
+  existingIds: Iterable<string>,
+  options: Partial<RoadRenderOptions> = {},
+): Cesium.Entity[] {
+  const existing = new Set(existingIds)
+  const created: Cesium.Entity[] = []
+  for (const feature of features.features) {
+    const routeId = String(feature.properties.id)
+    const before = new Set(container.values.map((entity) => String(entity.id)))
+    const primaryId = `road:${routeId}`
+    if (existing.has(primaryId) || before.has(primaryId)) continue
+    const primary = createRoadEntities(container, feature, options)
+    created.push(primary, ...container.values.filter((entity) => !before.has(String(entity.id))))
+  }
+  return created
+}
+
+/** 清除道路实体 */
 export function removeRoads(container: Cesium.EntityCollection): void {
   container.values
     .filter((e) => typeof e.id === 'string' && (e.id.startsWith('road:') || e.id.startsWith('road-volume:')))
